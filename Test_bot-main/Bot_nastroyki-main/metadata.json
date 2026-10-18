@@ -1,0 +1,6 @@
+{
+  "name": "Пульс Доступа",
+  "description": "Управление персональными подписками, Multi-Bot и Multi-Git (GitVerse, SourceCraft, GitFlic, MosHub, GitHub, GitLab), исключения, инструмент обработки ключей и инлайн-редактор центральной подписки.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

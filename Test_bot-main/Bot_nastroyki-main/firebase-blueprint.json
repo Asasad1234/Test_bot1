@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "SystemStore": {
+      "title": "SystemStore",
+      "description": "Master persistent store document and diagnostic probe records",
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "description": "Serialized JSON snapshot of the application store"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of last store update"
+        },
+        "lastTestNonce": {
+          "type": "string",
+          "description": "Diagnostic probe nonce"
+        },
+        "testedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Diagnostic test probe timestamp"
+        },
+        "clientAgent": {
+          "type": "string",
+          "description": "Client or probe identifier"
+        },
+        "status": {
+          "type": "string",
+          "description": "Status descriptor"
+        }
+      },
+      "required": []
+    }
+  },
+  "firestore": {
+    "/system_store/{docId}": {
+      "schema": "SystemStore",
+      "description": "Master system state storage and diagnostic probe collection"
+    }
+  }
+}

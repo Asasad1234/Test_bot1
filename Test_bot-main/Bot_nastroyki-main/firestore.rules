@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper validation functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidStoreDocument(data) {
+      return (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64)) &&
+             (!('testedAt' in data) || (data.testedAt is string && data.testedAt.size() <= 64)) &&
+             (!('payload' in data) || (data.payload is string && data.payload.size() <= 10000000)) &&
+             (!('lastTestNonce' in data) || (data.lastTestNonce is string && data.lastTestNonce.size() <= 128)) &&
+             (!('clientAgent' in data) || (data.clientAgent is string && data.clientAgent.size() <= 128)) &&
+             (!('status' in data) || (data.status is string && data.status.size() <= 64));
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Master state store & diagnostic probe documents
+    match /system_store/{docId} {
+      allow read: if isValidId(docId);
+      allow create, update: if isValidId(docId) && isValidStoreDocument(request.resource.data);
+      allow delete: if isValidId(docId);
+    }
+  }
+}

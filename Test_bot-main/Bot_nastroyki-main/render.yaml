@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: puls-dostupa
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_STORE_PATH
+        value: /var/data/data-store.json
+      - key: AUTO_RESTART_HOURS
+        value: 24
+      - key: TZ
+        value: Europe/Moscow
+    disk:
+      name: puls-dostupa-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  puls-dostupa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: puls-dostupa
+    restart: always # Автоматический перезапуск контейнера при любых сбоях или перезагрузке ОС
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - APP_URL=http://localhost:3000
+      - DATA_STORE_PATH=/var/data/data-store.json
+      # Выбор интервала автоперезапуска процесса (в часах):
+      # 0 = выключен (перезапуск только при сбое), 6 = каждые 6 часов, 12 = 12 ч, 24 = 24 ч (рекомендуется)
+      - AUTO_RESTART_HOURS=24
+      # Часовой пояс сервера и Telegram бота
+      - TZ=Europe/Moscow
+    volumes:
+      # Постоянное хранение базы данных между перезапусками контейнера
+      - ./data:/var/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
