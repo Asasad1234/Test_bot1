@@ -259,6 +259,7 @@ interface ExclusionSubscription {
   happUrl?: string;
   incyUrl?: string;
   clckUrl?: string;
+  clckTargetUrl?: string;
   lastSyncAt?: string;
   connectedClients?: ConnectedClientInfo[];
   // Temporary Exclusion (Тестовая ссылка с таймером)
@@ -2116,7 +2117,77 @@ function getUserSubscriptionTargetUrl(user: any): string {
 
 function getUserSubscriptionGatewayUrl(user: BotUser): string {
   const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
-  return `${getAppBaseUrl()}/api/sub/${encodeURIComponent(token)}`;
+  return getRepositorySubscriptionGatewayUrl(token);
+}
+
+function getRepositorySubscriptionGatewayUrl(token: string): string {
+  return `${getAppBaseUrl()}/api/repo-sub/${encodeURIComponent(token)}`;
+}
+
+async function readCurrentRepositoryFile(source: GitSourceItem, filePath: string): Promise<string> {
+  const cleanPath = filePath.replace(/^\/+/, '');
+  if (!cleanPath || cleanPath.split('/').includes('..')) {
+    throw new Error('Недопустимый путь файла подписки');
+  }
+  if (!source.token?.trim()) {
+    throw new Error(`Не настроен токен для Git-источника «${source.name}»`);
+  }
+
+  const { owner, repo } = getRepoParts(source);
+  const branch = source.branch || getDefaultGitBranch(source.provider);
+  const repoDir = path.join(
+    '/tmp/git_cache',
+    `${source.provider}_${`${owner}_${repo}`.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+  );
+  const remoteUrl = buildGitRemoteUrl(source.provider, owner, repo);
+  const gitEnv = buildGitAuthEnv(source.provider, source.token, source.username || owner);
+
+  return enqueueGitOperation(async () => {
+    await fs.promises.mkdir('/tmp/git_cache', { recursive: true });
+    let hasClone = false;
+    try {
+      hasClone = (await fs.promises.stat(path.join(repoDir, '.git'))).isDirectory();
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    if (!hasClone) {
+      await execFileAsync('git', ['clone', '--depth', '1', '-b', branch, remoteUrl, repoDir], {
+        timeout: 35000,
+        env: gitEnv,
+      });
+    } else {
+      await execFileAsync('git', ['remote', 'set-url', 'origin', remoteUrl], {
+        cwd: repoDir,
+        timeout: 5000,
+        env: gitEnv,
+      });
+      await execFileAsync('git', ['fetch', '--depth', '1', 'origin', branch], {
+        cwd: repoDir,
+        timeout: 25000,
+        env: gitEnv,
+      });
+      await execFileAsync('git', ['checkout', '-B', branch, `origin/${branch}`], {
+        cwd: repoDir,
+        timeout: 5000,
+        env: gitEnv,
+      });
+      await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], {
+        cwd: repoDir,
+        timeout: 5000,
+        env: gitEnv,
+      });
+    }
+
+    const result = await execFileAsync('git', ['show', `origin/${branch}:${cleanPath}`], {
+      cwd: repoDir,
+      timeout: 10000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: 'utf8',
+      env: gitEnv,
+    });
+    return result.stdout;
+  });
 }
 
 function isRepositoryRawUrl(source: GitSourceItem, rawUrl: string, filePath?: string): boolean {
@@ -5332,11 +5403,35 @@ app.post('/api/replacement-templates', (req, res) => {
 });
 
 // 5. Exclusion Subscriptions (Подписки-исключения: обычные и выдача из центрального источника с проверкой канала)
-app.get('/api/exclusions', (req, res) => {
+app.get('/api/exclusions', async (req, res) => {
+  let migratedLinks = false;
+  const migrationErrors: string[] = [];
   // Synchronize dynamic status from store.users for channel exclusions
   for (const excl of store.exclusions || []) {
     if (excl.gitRawUrl && !isHappUrlForVersion(excl.happUrl, store.happCryptVersion)) {
       excl.happUrl = buildHappCryptUrl(excl.gitRawUrl, store.happCryptVersion);
+    }
+    const clckTargetUrl = getRepositorySubscriptionGatewayUrl(excl.token);
+    if (
+      excl.gitFilePath &&
+      excl.gitRawUrl &&
+      (!isClckShortUrl(excl.clckUrl) || excl.clckTargetUrl !== clckTargetUrl)
+    ) {
+      try {
+        excl.clckUrl = await shortenIncyUrl(clckTargetUrl, excl.token);
+        excl.incyUrl = excl.clckUrl;
+        excl.clckTargetUrl = clckTargetUrl;
+        const linkedUser = store.users?.find((user) =>
+          user.id === excl.userId || user.subscriptionToken === excl.token
+        );
+        if (linkedUser?.subscriptionType === 'incy') {
+          applyUserIncyShortUrl(linkedUser, clckTargetUrl, excl.clckUrl);
+        }
+        migratedLinks = true;
+      } catch (err: any) {
+        console.error(`[Exclusion INCY link migration] Failed for ${excl.id}:`, err.message);
+        migrationErrors.push(excl.id);
+      }
     }
     if (excl.isChannelExclusion) {
       const user = store.users?.find((u) => u.id === excl.userId || u.subscriptionToken === excl.token);
@@ -5354,7 +5449,8 @@ app.get('/api/exclusions', (req, res) => {
       }
     }
   }
-  res.json({ exclusions: store.exclusions });
+  if (migratedLinks) saveStore();
+  res.json({ exclusions: store.exclusions, linkMigrationErrors: migrationErrors });
 });
 
 app.post('/api/exclusions', async (req, res) => {
@@ -5467,8 +5563,9 @@ app.post('/api/exclusions', async (req, res) => {
 
   // INCY version: shortened clck.ru link (e.g. https://clck.ru/3W7gT2)
   let clckUrl = '';
+  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token);
   try {
-    clckUrl = await shortenIncyUrl(gitRawUrl, token);
+    clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
     console.error('[Exclusion clck.ru shortening failed]:', err.message);
     return res.status(502).json({ success: false, message: `Не удалось создать короткую INCY-ссылку: ${err.message}` });
@@ -5494,6 +5591,7 @@ app.post('/api/exclusions', async (req, res) => {
     happUrl,
     incyUrl,
     clckUrl: clckUrl || undefined,
+    clckTargetUrl,
     lastSyncAt: new Date().toISOString(),
     connectedClients: [],
   };
@@ -5725,12 +5823,14 @@ app.post('/api/exclusions/:id/sync', async (req, res) => {
     }
   }
 
-  // Ensure clck.ru link is generated and up to date
-  if (target.gitRawUrl && !isClckShortUrl(target.clckUrl)) {
+  // Keep the short link pointed at a stable endpoint that reads this repo file's current branch version.
+  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(target.token);
+  if (target.gitRawUrl && (!isClckShortUrl(target.clckUrl) || target.clckTargetUrl !== clckTargetUrl)) {
     try {
-      const short = await shortenIncyUrl(target.gitRawUrl, target.token);
+      const short = await shortenIncyUrl(clckTargetUrl, target.token);
       target.clckUrl = short;
       target.incyUrl = short;
+      target.clckTargetUrl = clckTargetUrl;
     } catch (e: any) {
       console.error('[Exclusion sync clck shortening failed]:', e.message);
       saveStore();
@@ -5761,7 +5861,7 @@ app.post('/api/exclusions/:id/shorten-clck', async (req, res) => {
   const target = store.exclusions.find((e) => e.id === id);
   if (!target) return res.status(404).json({ success: false, message: 'Исключение не найдено' });
 
-  const rawUrl = target.gitRawUrl || '';
+  const rawUrl = getRepositorySubscriptionGatewayUrl(target.token);
   let shortUrl: string;
   try {
     shortUrl = await shortenIncyUrl(rawUrl, target.token);
@@ -5771,6 +5871,7 @@ app.post('/api/exclusions/:id/shorten-clck', async (req, res) => {
   }
   target.clckUrl = shortUrl;
   target.incyUrl = shortUrl;
+  target.clckTargetUrl = rawUrl;
   saveStore();
 
   res.json({ success: true, clckUrl: shortUrl, exclusion: target });
@@ -5869,8 +5970,9 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
 
   // INCY (clck.ru encrypted link)
   let clckUrl = '';
+  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token);
   try {
-    clckUrl = await shortenIncyUrl(gitRawUrl, token);
+    clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
     console.error('[Channel Exclusion clck shortening failed]:', err.message);
     return res.status(502).json({ success: false, message: `Не удалось создать короткую INCY-ссылку: ${err.message}` });
@@ -5912,6 +6014,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     gitRawUrl,
     finalSubscriptionUrl: format === 'happ' ? happUrl : incyUrl,
     clckUrl: clckUrl || undefined,
+    clckTargetUrl: format === 'incy' ? clckTargetUrl : undefined,
     detachedFromCentral: !isSubscribed,
   };
 
@@ -5937,6 +6040,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     happUrl,
     incyUrl,
     clckUrl: clckUrl || undefined,
+    clckTargetUrl,
     lastSyncAt: new Date().toISOString(),
     connectedClients: [],
     isChannelExclusion: true,
@@ -11134,6 +11238,55 @@ function setUnlimitedSubscriptionHeaders(
   res.setHeader('Subscription-Userinfo', parts.join('; '));
   res.setHeader('Profile-Update-Interval', '12');
 }
+
+app.get('/api/repo-sub/:token', async (req, res) => {
+  const { token } = req.params;
+  const user = store.users.find((item) => item.subscriptionToken === token);
+  const exclusion = store.exclusions.find((item) => item.token === token);
+  const linkedUser = user || (exclusion?.userId
+    ? store.users.find((item) => item.id === exclusion.userId || item.subscriptionToken === token)
+    : undefined);
+
+  if (!user && !exclusion) {
+    return res.status(404).send('Подписка не найдена');
+  }
+  const sourceSubscription = linkedUser?.sourceSubscriptions?.find((item) =>
+    !linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId
+  );
+  const filePath = linkedUser?.gitFilePath || sourceSubscription?.filePath || exclusion?.gitFilePath;
+  if (!filePath) {
+    return res.status(404).send('Файл подписки не привязан к репозиторию');
+  }
+
+  const repoFile = store.repoFiles?.find((item) =>
+    item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
+    (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
+    (!linkedUser || !item.userId || item.userId === linkedUser.id)
+  );
+  const matchingSourceSubscription = linkedUser?.sourceSubscriptions?.find((item) =>
+    item.filePath === filePath &&
+    (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
+  );
+  const sourceId = linkedUser?.subscriptionSourceId || matchingSourceSubscription?.sourceId || repoFile?.sourceId;
+  const source = sourceId
+    ? store.gitSources?.find((item) => item.id === sourceId)
+    : getActiveGitSource();
+  if (!source) {
+    return res.status(404).send('Git-источник файла подписки не найден');
+  }
+
+  try {
+    const content = await readCurrentRepositoryFile(source, filePath);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.send(content);
+  } catch (err: any) {
+    console.error(`[Repository subscription proxy] Failed to read ${source.name}/${filePath}:`, err.message);
+    return res.status(502).send(`Не удалось загрузить актуальный файл подписки из ${source.name}`);
+  }
+});
 
 // 10. Public Subscription Serving Endpoint with Replacement Enforcement (/api/sub/:token and /sub/:token)
 app.get(['/api/sub/:token', '/sub/:token'], async (req, res) => {
