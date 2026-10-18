@@ -128,6 +128,7 @@ export type MediaType = 'none' | 'photo' | 'video' | 'document';
 export type UserSubStatus = 'active' | 'blocked' | 'muted' | 'channel_inactive';
 export type ChannelMembershipStatus = 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked';
 export type SubscriptionType = 'happ' | 'incy' | 'single_device_ru' | 'standard' | 'exception';
+const SINGLE_DEVICE_ENFORCEMENT_ENABLED = false;
 type HappCryptVersion = 'crypt3' | 'crypt4' | 'crypt5';
 
 interface GitSourceItem {
@@ -1112,11 +1113,48 @@ function normalizeStore(parsed: any): StoreData {
   }
   for (const user of parsed.users || []) {
     if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
+    const linkedSubscription = user.sourceSubscriptions.find((item: any) =>
+      item.filePath && (!user.subscriptionSourceId || item.sourceId === user.subscriptionSourceId)
+    );
+    const linkedRepoFile = !user.gitFilePath && !linkedSubscription
+      ? (parsed.repoFiles || [])
+        .filter((file: RepoUserFile) =>
+          !file.isPoolFree &&
+          (file.userId === user.id || file.telegramId === user.telegramId) &&
+          file.filePath &&
+          (!user.subscriptionSourceId || !file.sourceId || file.sourceId === user.subscriptionSourceId)
+        )
+        .sort((a: RepoUserFile, b: RepoUserFile) => {
+          const sourceId = user.subscriptionSourceId || activeSource?.id;
+          const aSourceMatch = a.sourceId === sourceId ? 1 : 0;
+          const bSourceMatch = b.sourceId === sourceId ? 1 : 0;
+          if (aSourceMatch !== bSourceMatch) return bSourceMatch - aSourceMatch;
+          const aOwnerMatch = a.userId === user.id ? 1 : 0;
+          const bOwnerMatch = b.userId === user.id ? 1 : 0;
+          return bOwnerMatch - aOwnerMatch ||
+            new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+        })[0]
+      : undefined;
+    if (linkedSubscription && !user.gitFilePath) {
+      user.gitFilePath = linkedSubscription.filePath;
+      user.subscriptionSourceId = linkedSubscription.sourceId;
+      user.gitRawUrl = linkedSubscription.rawUrl || user.gitRawUrl;
+    } else if (linkedRepoFile) {
+      user.gitFilePath = linkedRepoFile.filePath;
+      user.subscriptionSourceId = linkedRepoFile.sourceId || activeSource?.id;
+      user.gitRawUrl = linkedRepoFile.rawUrl || user.gitRawUrl;
+      user.finalSubscriptionUrl = user.finalSubscriptionUrl || linkedRepoFile.finalUrl;
+      user.finalUrl = user.finalUrl || linkedRepoFile.finalUrl;
+    }
     if (!user.subscriptionSourceId && user.gitFilePath && activeSource?.id) {
       user.subscriptionSourceId = activeSource.id;
     }
     if (user.gitFilePath && user.subscriptionSourceId && !user.sourceSubscriptions.some((item: any) => item.sourceId === user.subscriptionSourceId)) {
-      const repoFile = (parsed.repoFiles || []).find((file: any) => file.filePath === user.gitFilePath);
+      const repoFile = (parsed.repoFiles || []).find((file: RepoUserFile) =>
+        file.filePath === user.gitFilePath &&
+        (!file.sourceId || file.sourceId === user.subscriptionSourceId) &&
+        (!file.userId || file.userId === user.id || file.telegramId === user.telegramId)
+      );
       user.sourceSubscriptions.push({
         sourceId: user.subscriptionSourceId,
         filePath: user.gitFilePath,
@@ -3543,24 +3581,28 @@ async function applyDisconnectStub(user: BotUser, reason: string, sourceNum: 1 |
 
 // Restore full nodes into user's GitVerse file when resubscribed or unblocked
 async function restoreUserNodes(user: BotUser): Promise<void> {
-  const activeGit = getActiveGitSource();
-  if (!user.gitFilePath || !activeGit.token || !activeGit.token.trim()) return;
-  const { owner, repo } = getRepoParts(activeGit);
+  const source = store.gitSources?.find((item) => item.id === user.subscriptionSourceId) || getActiveGitSource();
+  if (!user.gitFilePath || !source.token || !source.token.trim()) return;
+  const { owner, repo } = getRepoParts(source);
 
   try {
     const userContent = getUserRepoSubscriptionContent(user);
     const contentHash = crypto.createHash('sha256').update(userContent).digest('hex');
 
     const gitRes = await createOrUpdateGitVerseFile({
-      token: activeGit.token,
+      token: source.token,
       owner,
       repo,
-      branch: activeGit.branch || getDefaultGitBranch(activeGit.provider),
+      branch: source.branch || getDefaultGitBranch(source.provider),
       filePath: user.gitFilePath,
       content: userContent,
       commitMessage: `Restore nodes for user ${user.username ? '@' + user.username : user.telegramId}`,
+      provider: source.provider,
+      apiUrl: source.apiUrl,
     });
-    const poolFile = store.repoFiles?.find((f) => f.filePath === user.gitFilePath);
+    const poolFile = store.repoFiles?.find((file) =>
+      file.sourceId === source.id && file.filePath === user.gitFilePath
+    );
     if (poolFile) {
       poolFile.nodesFound = parseNodeStats(userContent).total;
       poolFile.sizeBytes = Buffer.byteLength(userContent, 'utf-8');
@@ -3713,6 +3755,74 @@ async function applyUserUnblockAndReset(user: BotUser, preserveWarningCount = fa
   }
 
   saveStore();
+}
+
+function hydrateUserGitFileLink(user: BotUser): boolean {
+  if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
+  let changed = false;
+  let subscription = user.sourceSubscriptions.find((item) =>
+    item.filePath && (!user.subscriptionSourceId || item.sourceId === user.subscriptionSourceId)
+  );
+  let repoFile: RepoUserFile | undefined;
+
+  if (!user.gitFilePath && subscription) {
+    user.gitFilePath = subscription.filePath;
+    user.subscriptionSourceId = subscription.sourceId;
+    user.gitRawUrl = subscription.rawUrl || user.gitRawUrl;
+    changed = true;
+  }
+
+  if (!user.gitFilePath) {
+    const preferredSourceId = user.subscriptionSourceId || getActiveGitSource().id;
+    repoFile = (store.repoFiles || [])
+      .filter((file) =>
+        !file.isPoolFree &&
+        (file.userId === user.id || file.telegramId === user.telegramId) &&
+        file.filePath &&
+        (!file.sourceId || file.sourceId === preferredSourceId)
+      )
+      .sort((a, b) => {
+        const aSourceMatch = a.sourceId === preferredSourceId ? 1 : 0;
+        const bSourceMatch = b.sourceId === preferredSourceId ? 1 : 0;
+        if (aSourceMatch !== bSourceMatch) return bSourceMatch - aSourceMatch;
+        const aOwnerMatch = a.userId === user.id ? 1 : 0;
+        const bOwnerMatch = b.userId === user.id ? 1 : 0;
+        return bOwnerMatch - aOwnerMatch ||
+          new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+      })[0];
+    if (repoFile) {
+      user.gitFilePath = repoFile.filePath;
+      user.subscriptionSourceId = repoFile.sourceId || preferredSourceId;
+      user.gitRawUrl = repoFile.rawUrl || user.gitRawUrl;
+      user.finalSubscriptionUrl = user.finalSubscriptionUrl || repoFile.finalUrl;
+      user.finalUrl = user.finalUrl || repoFile.finalUrl;
+      changed = true;
+    }
+  }
+
+  if (!user.gitFilePath) return changed;
+  const sourceId = user.subscriptionSourceId || getActiveGitSource().id;
+  user.subscriptionSourceId = sourceId;
+  subscription = user.sourceSubscriptions.find(
+    (item) => item.sourceId === sourceId && item.filePath === user.gitFilePath
+  );
+  if (!subscription) {
+    repoFile ||= (store.repoFiles || []).find((file) =>
+      file.filePath === user.gitFilePath &&
+      (!file.sourceId || file.sourceId === sourceId) &&
+      (!file.userId || file.userId === user.id || file.telegramId === user.telegramId)
+    );
+    user.sourceSubscriptions.push({
+      sourceId,
+      filePath: user.gitFilePath,
+      rawUrl: user.gitRawUrl || repoFile?.rawUrl || '',
+      format: user.subscriptionType === 'incy' ? 'incy' : 'happ',
+      finalUrl: user.finalSubscriptionUrl || user.finalUrl || repoFile?.finalUrl || '',
+      updatedAt: repoFile?.updatedAt || user.receivedAt || new Date().toISOString(),
+    });
+    changed = true;
+  }
+  return changed;
 }
 
 // Permanently delete user subscription from GitVerse and system after deadline expires
@@ -3890,6 +4000,10 @@ async function syncGitSourceSubscribersWithCentral(activeGit: GitSourceItem, opt
     try {
       await activePushWorkerPromise;
     } catch {}
+  }
+
+  for (const user of store.users || []) {
+    hydrateUserGitFileLink(user);
   }
 
   // Auto-allocate gitFilePath for any active subscriber missing a repository file
@@ -4458,12 +4572,17 @@ function computeSyncHealthReport() {
 
   const eligibleUsers = (store.users || []).filter((u) => u.hasActiveSubscription);
   const subscriberReports = eligibleUsers.map((user) => {
+    hydrateUserGitFileLink(user);
     const isMuted = user.status === 'muted' || (user.mutedUntil && new Date(user.mutedUntil).getTime() > Date.now());
     const isBlocked = user.status === 'blocked' || user.isBlocked;
     const userStatusStr = String(user.status);
     const isLeft = user.channelMembership === 'left' || userStatusStr === 'channel_inactive' || userStatusStr === 'bot_blocked' || userStatusStr === 'unsubscribed';
 
-    const repoFile = store.repoFiles?.find((f) => f.filePath === user.gitFilePath);
+    const repoFile = store.repoFiles?.find((file) =>
+      file.filePath === user.gitFilePath &&
+      (!file.sourceId || file.sourceId === user.subscriptionSourceId) &&
+      (!file.userId || file.userId === user.id || file.telegramId === user.telegramId)
+    );
     const expectedContent = getUserRepoSubscriptionContent(user);
     const expectedContentHash = crypto.createHash('sha256').update(expectedContent).digest('hex');
     const currentNodesCount = repoFile?.nodesFound ?? parseNodeStats(expectedContent).total;
@@ -4617,26 +4736,33 @@ function computeSyncHealthReport() {
 async function pullLatestCentralContent(): Promise<void> {
   const activeGit = getActiveGitSource();
   const filePath = store.centralFile.filename || activeGit.filePath || 'L';
-  const rawUrl = activeGit.provider === 'sourcecraft'
-    ? buildGitRawUrl(activeGit, filePath)
-    : store.centralFile.centralRawUrl || activeGit.centralRawUrl || buildGitRawUrl(activeGit, filePath);
-  if (!rawUrl) {
-    throw new Error(`Не настроена RAW-ссылка центрального файла в источнике «${activeGit.name}»`);
+  let rawUrl = '';
+  let content: string;
+  if (activeGit.provider === 'sourcecraft') {
+    content = await readCurrentRepositoryFile(activeGit, filePath);
+    rawUrl = buildGitRawUrl(activeGit, filePath) ||
+      store.centralFile.centralRawUrl ||
+      activeGit.centralRawUrl ||
+      '';
+  } else {
+    rawUrl = store.centralFile.centralRawUrl || activeGit.centralRawUrl || buildGitRawUrl(activeGit, filePath);
+    if (!rawUrl) {
+      throw new Error(`Не настроена RAW-ссылка центрального файла в источнике «${activeGit.name}»`);
+    }
+    const response = await fetch(rawUrl, {
+      headers: {
+        'User-Agent': 'PulsAccess/2.0',
+        Accept: 'text/plain, */*',
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      throw new Error(`Не удалось прочитать центральный файл из ${activeGit.name}: HTTP ${response.status}`);
+    }
+    content = await response.text();
   }
-
-  const response = await fetch(rawUrl, {
-    headers: {
-      'User-Agent': 'PulsAccess/2.0',
-      Accept: 'text/plain, */*',
-      'Cache-Control': 'no-cache',
-      Pragma: 'no-cache',
-    },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!response.ok) {
-    throw new Error(`Не удалось прочитать центральный файл из ${activeGit.name}: HTTP ${response.status}`);
-  }
-  const content = await response.text();
   if (!content.trim()) {
     throw new Error(`Центральный файл в источнике «${activeGit.name}» пуст; синхронизация отменена`);
   }
@@ -4645,7 +4771,7 @@ async function pullLatestCentralContent(): Promise<void> {
   const latestHash = crypto.createHash('sha256').update(content).digest('hex');
   if (previousHash !== latestHash) {
     store.centralFile.content = content;
-    store.centralFile.centralRawUrl = rawUrl;
+    if (rawUrl) store.centralFile.centralRawUrl = rawUrl;
     store.centralFile.lastUpdatedAt = new Date().toISOString();
     store.centralFile.lastCommitMessage = `Pulled before subscriber force-resync from ${activeGit.name}`;
     saveStore();
@@ -4653,6 +4779,7 @@ async function pullLatestCentralContent(): Promise<void> {
 }
 
 async function forceResyncSubscriber(user: BotUser): Promise<{ success: boolean; message: string; user: BotUser; nodesCount: number }> {
+  hydrateUserGitFileLink(user);
   const activeGit = getActiveGitSource();
   const targetGit = store.gitSources?.find((source) => source.id === user.subscriptionSourceId) || activeGit;
   const format = user.subscriptionType === 'happ' ? 'happ' : 'incy';
@@ -6475,8 +6602,10 @@ app.delete('/api/exclusions/:id', async (req, res) => {
 // 6. Users & Subscriptions Detailed Management
 app.get('/api/users', async (req, res) => {
   let migratedHappLinks = false;
+  let hydratedUserLinks = false;
   const staleIncyUsers: BotUser[] = [];
   for (const user of store.users || []) {
+    hydratedUserLinks = hydrateUserGitFileLink(user) || hydratedUserLinks;
     if (
       user.subscriptionType === 'happ' &&
       (!isHappUrlForVersion(user.finalSubscriptionUrl, store.happCryptVersion) ||
@@ -6527,7 +6656,7 @@ app.get('/api/users', async (req, res) => {
     }
   });
   await Promise.all(workers);
-  if (migratedHappLinks || failedIncyMigrations) saveStore();
+  if (migratedHappLinks || failedIncyMigrations || hydratedUserLinks) saveStore();
   res.json({ users: store.users });
 });
 
@@ -10833,6 +10962,49 @@ async function evaluateUserSubscriptionStatus(
   const currentAgent = clientAgent || 'Client';
   const activeBot = getActiveBot();
 
+  if (
+    !SINGLE_DEVICE_ENFORCEMENT_ENABLED &&
+    user.secondDeviceActive &&
+    user.secondDeviceInfo &&
+    (
+      user.blockedReason === 'Обнаружена попытка передачи подписки на другое устройство' ||
+      /Перманентный бан: истек срок на удаление со второго устройства/i.test(user.subscriptionStatusReason || '')
+    )
+  ) {
+    user.status = user.channelMembership === 'left' ? 'channel_inactive' : 'active';
+    user.isBlocked = false;
+    user.isPermanentlyBanned = false;
+    user.blockedReason = undefined;
+    user.subscriptionStatusReason = '🟢 Автоматическая блокировка второго устройства отключена.';
+    user.sharingGraceDeadlineAt = null;
+    user.mutedUntil = null;
+    user.isTimerFrozen = true;
+    user.secondDeviceActive = false;
+    user.secondDeviceInfo = null;
+    user.secondDeviceBlockedCount = 0;
+    user.boundDevice = null;
+    user.deviceLocked = false;
+
+    const linkedExclusion = store.exclusions?.find(
+      (item) => item.userId === user.id || item.token === user.subscriptionToken
+    );
+    if (linkedExclusion) {
+      linkedExclusion.status = user.status;
+      linkedExclusion.isBlocked = false;
+      linkedExclusion.isMuted = false;
+      linkedExclusion.sharingGraceDeadlineAt = null;
+      linkedExclusion.secondDeviceActive = false;
+      linkedExclusion.secondDeviceInfo = null;
+      linkedExclusion.secondDeviceBlockedCount = 0;
+      linkedExclusion.boundDevice = null;
+      linkedExclusion.deviceLocked = false;
+      linkedExclusion.subscriptionStatusReason = user.subscriptionStatusReason;
+    }
+
+    await restoreUserNodes(user);
+    saveStore();
+  }
+
   // 1. Permanent Ban check -> Source 3
   if (user.isPermanentlyBanned || (!user.isTimerFrozen && user.deviceViolationAttempts && user.deviceViolationAttempts >= 3 && (user.status === 'blocked' || user.isBlocked))) {
     const overrideNodes = await getReplacementSourceNodes(3);
@@ -11027,7 +11199,7 @@ async function evaluateUserSubscriptionStatus(
 
   // 4. MOMENT OF FIRST IMPORT: Bind strictly to this user's HWID!
   // Only bind real VPN clients, not curl / browser inspections
-  if (!user.boundDevice && !isCurlOrBrowser && (user.deviceLocked || user.isChannelExclusion || user.hasActiveSubscription || user.subscriptionType === 'single_device_ru' || user.subscriptionType === 'happ' || user.subscriptionType === 'incy')) {
+  if (SINGLE_DEVICE_ENFORCEMENT_ENABLED && !user.boundDevice && !isCurlOrBrowser && (user.deviceLocked || user.isChannelExclusion || user.hasActiveSubscription || user.subscriptionType === 'single_device_ru' || user.subscriptionType === 'happ' || user.subscriptionType === 'incy')) {
     user.deviceLocked = true;
     user.boundDevice = {
       deviceId: incomingHwid,
@@ -11059,7 +11231,7 @@ async function evaluateUserSubscriptionStatus(
   }
 
   // 5. Subsequent connection checks: Anti-Sharing & 2nd Device Detection
-  if (user.deviceLocked && user.boundDevice) {
+  if (SINGLE_DEVICE_ENFORCEMENT_ENABLED && user.deviceLocked && user.boundDevice) {
     // If bound device was previously set to curl/browser/placeholder, re-bind on first real VPN client connection!
     const boundIsPlaceholder = user.boundDevice.clientName.toLowerCase().includes('curl') || 
       user.boundDevice.ip === '127.0.0.1' || 
@@ -12691,7 +12863,7 @@ async function startServer() {
 
       for (const user of store.users || []) {
         // Condition 1: Sharing grace deadline expired without second user deleting subscription -> PERMANENT BAN (Source 3)
-        if (user.sharingGraceDeadlineAt && !user.isTimerFrozen && now >= new Date(user.sharingGraceDeadlineAt).getTime()) {
+        if (SINGLE_DEVICE_ENFORCEMENT_ENABLED && user.sharingGraceDeadlineAt && !user.isTimerFrozen && now >= new Date(user.sharingGraceDeadlineAt).getTime()) {
           console.log(`[Grace Timer Expired] @${user.username || user.telegramId} did not remove second device in time. Enforcing PERMANENT BAN.`);
           user.status = 'blocked';
           user.isBlocked = true;
