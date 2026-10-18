@@ -246,7 +246,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Система полностью активна: Multi-Bot, Multi-Git & Управление доступом
             </h3>
             <p className="text-xs text-emerald-800 leading-relaxed">
-              API ботов и источников Git сохраняются устойчиво. Бот привязан к каналу <strong>{activeBot?.channels?.[0]?.id || '@puls_channel'}</strong> с правами администратора. Реализованы подписки-исключения, обрыв сети (Mute/Пауза), воронка с выбором HAPP (crypt5) и INCY (прямой VLESS RAW), а также шаблоны узлов-заглушек при отписке.
+              API ботов и источников Git сохраняются устойчиво. Бот привязан к каналу <strong>{activeBot?.channels?.[0]?.id || '@puls_channel'}</strong> с правами администратора. Реализованы подписки-исключения, обрыв сети (Mute/Пауза), воронка с выбором HAPP (crypt4) и INCY (прямой VLESS RAW), а также шаблоны узлов-заглушек при отписке.
             </p>
           </div>
         </div>
@@ -455,7 +455,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <p className="mt-2 text-xs text-stone-600 font-medium flex items-center space-x-1">
             <Activity className="h-3.5 w-3.5 text-stone-400" />
-            <span>HAPP (crypt5) + INCY (qsen.ru)</span>
+            <span>HAPP (crypt4) + INCY (qsen.ru)</span>
           </p>
         </div>
 

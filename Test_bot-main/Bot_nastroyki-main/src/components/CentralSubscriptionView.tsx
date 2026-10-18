@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layers, 
   Save, 
@@ -54,8 +54,8 @@ interface CentralSubscriptionViewProps {
   onSetDefaultGitSource?: (id: string) => Promise<any>;
   onMakeCentralGitSource?: (id: string) => Promise<any>;
   onRefreshData?: () => Promise<void>;
-  onSave: (payload: Partial<CentralSubscriptionSavePayload> & { content: string; autoSyncEnabled: boolean; filename: string }) => Promise<void>;
-  onSync: (direction: 'push' | 'pull', centralRawUrl?: string) => Promise<void>;
+  onSave: (payload: Partial<CentralSubscriptionSavePayload> & { content: string; autoSyncEnabled: boolean; filename: string }) => Promise<{ message?: string; syncResult?: { errors?: string[] } }>;
+  onSync: (direction: 'push' | 'pull', centralRawUrl?: string, content?: string) => Promise<{ content?: string } | void>;
   onSyncToSubscribers?: () => Promise<any>;
   onUpdateAutoSyncConfig?: (intervalSeconds: number, enabled?: boolean) => Promise<any>;
   onNavigateToProcessor?: () => void;
@@ -89,17 +89,30 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
 
   const getProviderRawUrl = (source: any, fname = 'L') => {
     if (!source) return 'https://gitverse.ru/api/repos/Vaynet/bot/raw/branch/master/L';
-    if (source.centralRawUrl) return source.centralRawUrl;
     const branch = source.branch || (source.provider === 'sourcecraft' || source.provider === 'github' ? 'main' : 'master');
     if (source.provider === 'sourcecraft') {
       const shaMatch = (source.baseRawUrl || source.centralRawUrl || '').match(/\/raw\/[^\/]+\/[^\/]+\/([0-9a-f]{40})\//i);
-      const targetRef = shaMatch ? shaMatch[1] : 'b10033a9ce8a1c8b075a82fd2ea4b1aa9431284e';
-      return `https://raw.sourcecraft.tech/raw/${source.repository}/${targetRef}/${fname}`;
+      if (shaMatch) return `https://raw.sourcecraft.tech/raw/${source.repository}/${shaMatch[1]}/${fname}`;
+      return source.centralRawUrl || '';
     }
-    return `https://gitverse.ru/api/repos/${source.repository || 'Vaynet/bot'}/raw/branch/${branch}/${fname}`;
+    if (source.provider === 'gitflic') {
+      return `https://gitflic.ru/project/${source.repository}/blob/raw?file=${encodeURIComponent(fname)}`;
+    }
+    if (source.provider === 'moshub') {
+      return `https://hub.mos.ru/${source.repository}/-/raw/${branch}/${fname}`;
+    }
+    if (source.provider === 'github') {
+      return `https://raw.githubusercontent.com/${source.repository}/${branch}/${fname}`;
+    }
+    if (source.provider === 'gitlab') {
+      return `https://gitlab.com/${source.repository}/-/raw/${branch}/${fname}`;
+    }
+    return source.centralRawUrl || `https://gitverse.ru/api/repos/${source.repository || 'Vaynet/bot'}/raw/branch/${branch}/${fname}`;
   };
 
   const [content, setContent] = useState<string>(centralFile?.content || '');
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const [isContentDirty, setIsContentDirty] = useState(false);
   const [autoSync, setAutoSync] = useState<boolean>(centralFile?.autoSyncEnabled ?? true);
   const [autoSyncInterval, setAutoSyncInterval] = useState<number>(centralFile?.autoSyncIntervalSeconds || 1);
   const [filename, setFilename] = useState<string>(centralFile?.filename || 'L');
@@ -183,7 +196,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
     setIsSaving(true);
     setStatusMessage(null);
     try {
-      await onSave({
+      const result = await onSave({
         content,
         autoSyncEnabled: autoSync,
         filename,
@@ -286,7 +299,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
   const [activeBlockingTab, setActiveBlockingTab] = useState<'all' | 'bot_deleted' | 'device_binding' | 'limit_exceeded'>('all');
 
   useEffect(() => {
-    if (centralFile?.content !== undefined) {
+    if (centralFile?.content !== undefined && !isContentDirty) {
       setContent(centralFile.content);
     }
     if (centralFile?.centralRawUrl) {
@@ -341,7 +354,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
     } else if (gitSource) {
       setRepositoryUrl(getProviderRepoUrl(gitSource));
     }
-  }, [centralFile, gitSource]);
+  }, [centralFile, gitSource, isContentDirty]);
 
   // Repo Files & Free Links Pool State
   const [repoFiles, setRepoFiles] = useState<RepoUserFile[]>([]);
@@ -499,7 +512,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
     setIsSaving(true);
     setStatusMessage(null);
     try {
-      await onSave({
+      const result = await onSave({
         content,
         autoSyncEnabled: autoSync,
         filename,
@@ -520,9 +533,10 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
         limitExceededMaxAttempts,
         limitExceededNotice,
       });
+      setIsContentDirty(false);
       setStatusMessage({
-        type: 'success',
-        text: 'Центральная подписка и параметры 3 типов блокировок успешно сохранены в системе!',
+        type: result.syncResult?.errors?.length ? 'error' : 'success',
+        text: result.message || 'Центральная подписка и параметры 3 типов блокировок успешно сохранены.',
       });
     } catch (err: any) {
       setStatusMessage({ type: 'error', text: err.message || 'Ошибка сохранения' });
@@ -555,7 +569,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
         setLastSubscribersErrors(errors);
         setStatusMessage({
           type: 'error',
-          text: `Синхронизация завершена с ошибками: ${errors.length} файлов не удалось обновить в GitVerse!`,
+          text: `${res.message || 'Синхронизация завершена с ошибками.'} Не удалось обработать файлов: ${errors.length}.`,
         });
       } else {
         setStatusMessage({
@@ -644,9 +658,13 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
     setStatusMessage(null);
     const nowTime = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     try {
-      await onSync(direction, centralRawUrl);
+      const result = await onSync(direction, centralRawUrl, direction === 'push' ? content : undefined);
+      if (result?.content !== undefined) {
+        setContent(result.content);
+        setIsContentDirty(false);
+      }
       const successMsg = direction === 'push'
-        ? `Конфигурация успешно зафиксирована в репозитории GitVerse (${nowTime})!`
+        ? `Конфигурация успешно зафиксирована в выбранном Git-источнике (${nowTime})!`
         : `Свежая конфигурация успешно загружена из источника RAW: ${centralRawUrl} (${nowTime})`;
       setStatusMessage({
         type: 'success',
@@ -661,9 +679,9 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
       const errMsg = err.message || 'Ошибка синхронизации';
       setStatusMessage({ type: 'error', text: errMsg });
       if (direction === 'push') {
-        setLastGitPushResult({ success: false, timestamp: nowTime, message: 'Сбой отправки в GitVerse', error: errMsg });
+        setLastGitPushResult({ success: false, timestamp: nowTime, message: 'Сбой отправки в Git-источник', error: errMsg });
       } else {
-        setLastGitPullResult({ success: false, timestamp: nowTime, message: 'Сбой загрузки из GitVerse', error: errMsg });
+        setLastGitPullResult({ success: false, timestamp: nowTime, message: 'Сбой загрузки из Git-источника', error: errMsg });
       }
     } finally {
       setIsSyncing(null);
@@ -678,6 +696,33 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
     navigator.clipboard.writeText(content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleImportContentFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const importedContent = await file.text();
+      setContent(importedContent);
+      setIsContentDirty(true);
+      setStatusMessage({
+        type: 'success',
+        text: `Файл «${file.name}» загружен в редактор. Нажмите «Сохранить» или «Запушить в Git», чтобы применить изменения.`,
+      });
+    } catch (err: any) {
+      setStatusMessage({ type: 'error', text: `Не удалось прочитать файл: ${err.message || 'ошибка чтения'}` });
+    }
+  };
+
+  const handleExportContentFile = () => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = filename || 'subscription.txt';
+    anchor.click();
+    URL.revokeObjectURL(downloadUrl);
   };
 
   const handleAddNodeSubmit = (e: React.FormEvent) => {
@@ -739,10 +784,10 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
                   ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
                   : 'border-stone-200 hover:bg-stone-50 text-stone-700'
               }`}
-              title="Загрузить изменения из репозитория GitVerse"
+              title={`Загрузить файл центральной подписки из активного источника ${gitSource?.name || 'Git'}`}
             >
               <ArrowDownToLine className={`h-3.5 w-3.5 ${isSyncing === 'pull' ? 'animate-bounce' : ''}`} />
-              <span>Подтянуть из Git</span>
+              <span>Импорт из источника</span>
               {lastGitPullResult && (
                 <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${lastGitPullResult.success ? 'bg-emerald-200 text-emerald-900' : 'bg-rose-200 text-rose-900'}`}>
                   {lastGitPullResult.success ? 'OK' : 'ERR'}
@@ -761,10 +806,10 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
                   ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
                   : 'border-stone-200 hover:bg-stone-50 text-stone-700'
               }`}
-              title="Закоммитить и отправить в Git-репозиторий GitVerse"
+              title={`Заменить центральный файл в активном источнике ${gitSource?.name || 'Git'} и синхронизировать подписки`}
             >
               <ArrowUpFromLine className={`h-3.5 w-3.5 ${isSyncing === 'push' ? 'animate-bounce' : ''}`} />
-              <span>Запушить в Git</span>
+              <span>Экспорт в источник</span>
               {lastGitPushResult && (
                 <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${lastGitPushResult.success ? 'bg-emerald-200 text-emerald-900' : 'bg-rose-200 text-rose-900'}`}>
                   {lastGitPushResult.success ? 'OK' : 'ERR'}
@@ -839,7 +884,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
               <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
               <div>
                 <span className="font-bold text-rose-950 text-sm block">
-                  Ошибка отправки в GitVerse ({lastGitPushResult.timestamp}):
+                  Ошибка отправки в Git-источник ({lastGitPushResult.timestamp}):
                 </span>
                 <p className="mt-0.5 text-rose-800 leading-relaxed font-mono">
                   {lastGitPushResult.error || lastGitPushResult.message}
@@ -931,7 +976,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
               <div>
                 <span className="font-semibold">Синхронизация с подписчиками выполнена ({lastSyncSubscribersResult.timestamp}):</span>{' '}
                 <span>
-                  {lastSyncSubscribersResult.syncedUsers} активных файлов пользователей обновлено, {lastSyncSubscribersResult.syncedExclusions} исключений актуализировано.
+                  Файлов подписок обработано: {lastSyncSubscribersResult.syncedUsers}; файлов исключений: {lastSyncSubscribersResult.syncedExclusions}.
                 </span>
               </div>
             </div>
@@ -941,7 +986,7 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
                 <span>{lastSyncSubscribersResult.durationMs} мс</span>
               </span>
               <span className="px-2.5 py-0.5 rounded-full bg-emerald-200 text-emerald-800 text-[11px] font-bold">
-                Все пользователи синхронизированы
+                Синхронизация файлов завершена
               </span>
             </div>
           </div>
@@ -1245,6 +1290,33 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept=".txt,.json,text/plain,application/json"
+              onChange={handleImportContentFile}
+              className="hidden"
+            />
+            <button
+              type="button"
+              id="btn-import-central-content"
+              onClick={() => importFileInputRef.current?.click()}
+              className="text-xs px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 font-medium transition-colors flex items-center gap-1 shadow-xs"
+              title="Заменить содержимое редактора текстом из локального файла; отправка в репозиторий выполняется отдельно"
+            >
+              <ArrowDownToLine className="h-3 w-3" />
+              <span>Импорт в редактор</span>
+            </button>
+            <button
+              type="button"
+              id="btn-export-central-content"
+              onClick={handleExportContentFile}
+              className="text-xs px-2.5 py-1 rounded-lg bg-violet-50 hover:bg-violet-100 text-violet-800 border border-violet-200 font-medium transition-colors flex items-center gap-1 shadow-xs"
+              title="Скачать текущее содержимое редактора в текстовый файл"
+            >
+              <ArrowUpFromLine className="h-3 w-3" />
+              <span>Экспорт файла</span>
+            </button>
             <button
               type="button"
               id="btn-insert-section-divider"
@@ -1307,7 +1379,10 @@ export const CentralSubscriptionView: React.FC<CentralSubscriptionViewProps> = (
           <textarea
             id="textarea-central-content"
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={(e) => {
+              setContent(e.target.value);
+              setIsContentDirty(true);
+            }}
             rows={14}
             className="w-full font-mono text-xs sm:text-sm text-stone-900 bg-stone-50/50 p-4 rounded-xl border border-stone-200 focus:bg-white focus:outline-none focus:border-stone-400 leading-relaxed resize-y"
             placeholder="Вставьте ссылки на серверы (vless://, vmess://, ss://, trojan://)..."

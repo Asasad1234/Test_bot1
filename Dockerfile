@@ -17,7 +17,7 @@ ENV PORT=3000
 ENV AUTO_RESTART_HOURS=24
 ENV TZ=Europe/Moscow
 
-RUN apk add --no-cache curl bash tzdata
+RUN apk add --no-cache curl bash git tzdata
 
 COPY Test_bot-main/Bot_nastroyki-main/package*.json ./
 RUN npm install --omit=dev

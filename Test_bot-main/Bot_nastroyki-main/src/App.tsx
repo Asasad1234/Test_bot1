@@ -189,9 +189,9 @@ export default function App() {
           if (lastSyncedContentRef.current !== null && latestCentral.content !== lastSyncedContentRef.current) {
             console.log('[CentralFile Watcher] Detected content change. Triggering push to Git and active subscribers...');
             isSyncingGitRef.current = true;
-            lastSyncedContentRef.current = latestCentral.content;
             setCentralFile(latestCentral);
             await syncCentralFileWithGit('push', latestCentral.centralRawUrl);
+            lastSyncedContentRef.current = latestCentral.content;
             await loadAllData();
           } else if (lastSyncedContentRef.current === null) {
             lastSyncedContentRef.current = latestCentral.content;
@@ -218,15 +218,17 @@ export default function App() {
       lastSyncedContentRef.current = res.centralFile.content;
     }
     await loadAllData();
+    return res;
   };
 
-  const handleSyncGit = async (direction: 'push' | 'pull', centralRawUrl?: string) => {
-    const res = await syncCentralFileWithGit(direction, centralRawUrl);
+  const handleSyncGit = async (direction: 'push' | 'pull', centralRawUrl?: string, content?: string) => {
+    const res = await syncCentralFileWithGit(direction, centralRawUrl, content);
     if (res.content && centralFile) {
       setCentralFile({ ...centralFile, content: res.content });
       lastSyncedContentRef.current = res.content;
     }
     await loadAllData();
+    return res;
   };
 
   const handleSyncToSubscribers = async () => {
@@ -361,8 +363,9 @@ export default function App() {
   };
 
   const handleDeleteUser = async (id: string) => {
-    await deleteUser(id);
+    const result = await deleteUser(id);
     await loadAllData();
+    return { warning: result.warning };
   };
 
   const handleTerminateUser = async (id: string) => {
@@ -503,6 +506,7 @@ export default function App() {
         {currentTab === 'users' && (
           <UsersChannelView
             users={users}
+            gitSources={gitSources}
             status={status}
             centralContent={centralFile?.content}
             onSyncChannel={loadAllData}
@@ -620,7 +624,7 @@ export default function App() {
           <div className="flex items-center space-x-3">
             <span>GitVerse • GitFlic • MosHub • GitHub • GitLab</span>
             <span>•</span>
-            <span>HAPP (crypt5) • INCY (qsen.ru)</span>
+            <span>HAPP (crypt4) • INCY (qsen.ru)</span>
             <span>•</span>
             <span className="text-emerald-600 font-medium">Система активна</span>
           </div>

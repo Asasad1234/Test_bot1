@@ -12,14 +12,14 @@ export const CANONICAL_BOT_TEMPLATES = {
 
   chooseFormatMessage:
     '🎯 **Выберите формат вашей персональной подписки:**\n\n' +
-    '1️⃣ 🚀 **HAPP (crypt5)** — Защищенное сквозное шифрование ключа для официального приложения HAPP (Android / Windows). Рекомендуемый формат.\n\n' +
+    '1️⃣ 🚀 **HAPP (crypt4)** — Защищенное сквозное шифрование ключа для официального приложения HAPP (Android / Windows). Рекомендуемый формат.\n\n' +
     '2️⃣ ⚡ **INCY** — Прямая универсальная ссылка для приложений, INCY. Преимущественно устройства IOS\n\n' +
     '💡 *Подписка выдается 1 раз (персональный доступ на 1 устройство). Вы можете переключать форматы между HAPP и INCY в любой момент без потери доступа!*',
 
   subIssuedMessage:
     '✨ **ВАША ПЕРСОНАЛЬНАЯ ПОДПИСКА ГОТОВА!** ✨\n\n' +
     '🏷 **Формат:** {subTypeName}\n' +
-    '📡 **Доступных серверов:** {totalServers}\n' +
+    '📄 **Источник:** содержимое центральной подписки без преобразований\n' +
     '👤 **Доступ:** Персональный ключ (строго 1 устройство)\n' +
     '🕒 **Время выдачи:** {time} ({tz})\n\n' +
     '🔑 **Ваш ключ доступа:**\n' +
@@ -109,7 +109,7 @@ export function formatBotTemplate(template: string, vars: TemplateVariables): st
   const isHapp = (vars.format || vars.subTypeName || '').toLowerCase().includes('happ');
   const otherFmt =
     vars.otherFormat ||
-    (isHapp ? 'INCY' : 'HAPP (crypt5)');
+    (isHapp ? 'INCY' : 'HAPP (crypt4)');
   const appGuide = vars.appGuide || (isHapp ? 'HAPP' : 'v2rayNG / Sing-box / Streisand / Shadowrocket');
 
   const replacements: Record<string, string> = {
@@ -121,8 +121,8 @@ export function formatBotTemplate(template: string, vars: TemplateVariables): st
       : vars.name || 'Пользователь',
     '{id}': String(vars.id || vars.telegramId || ''),
     '{telegramId}': String(vars.telegramId || vars.id || ''),
-    '{subTypeName}': vars.subTypeName || vars.format || (isHapp ? 'HAPP (crypt5)' : 'INCY'),
-    '{format}': vars.format || vars.subTypeName || (isHapp ? 'HAPP (crypt5)' : 'INCY'),
+    '{subTypeName}': vars.subTypeName || vars.format || (isHapp ? 'HAPP (crypt4)' : 'INCY'),
+    '{format}': vars.format || vars.subTypeName || (isHapp ? 'HAPP (crypt4)' : 'INCY'),
     '{otherFormat}': otherFmt,
     '{appGuide}': appGuide,
     '{status}': vars.status || '🟢 Активна',

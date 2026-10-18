@@ -419,7 +419,7 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
   const [isStage03Copied, setIsStage03Copied] = useState<boolean>(false);
   const [showStage03Preview, setShowStage03Preview] = useState<boolean>(false);
 
-  // 5b. Stage 04: Subscription Gateway Output & Encoders (crypt5 HAPP & clck.ru / INCY)
+  // 5b. Stage 04: Subscription Gateway Output & Encoders (crypt4 HAPP & clck.ru / INCY)
   const [gatewayToken, setGatewayToken] = useState<string>(() => `gw_${Math.random().toString(36).substring(2, 8)}`);
   const [gatewayUrlOverride, setGatewayUrlOverride] = useState<string>('http://shluz.xsph.ru');
   const [gatewayFormat, setGatewayFormat] = useState<'both' | 'happ' | 'clck'>('both');
@@ -2826,7 +2826,7 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
                     </h3>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Формирование ссылок через скоростной шлюз РФ: HAPP (crypt5) и прямой шлюз INCY
+                    Формирование ссылок через скоростной шлюз РФ: HAPP (crypt4) и прямой шлюз INCY
                   </p>
                 </div>
               </div>
@@ -2889,8 +2889,8 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
                   onChange={(e) => setGatewayFormat(e.target.value as any)}
                   className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-white text-slate-900 text-xs focus:outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer font-semibold"
                 >
-                  <option value="both">Оба (HAPP crypt5 + INCY шлюз)</option>
-                  <option value="happ">Только HAPP (crypt5)</option>
+                  <option value="both">Оба (HAPP crypt4 + INCY шлюз)</option>
+                  <option value="happ">Только HAPP (crypt4)</option>
                   <option value="clck">Только INCY (шлюз РФ)</option>
                 </select>
               </div>
@@ -2910,13 +2910,13 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                  {/* HAPP crypt5 Card */}
+                  {/* HAPP crypt4 Card */}
                   {gatewayEncodedResult.happUrl && (
                     <div className="p-4 rounded-2xl bg-white border border-purple-200 shadow-xs space-y-2.5">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-bold text-purple-900 flex items-center gap-1.5">
                           <Sparkles className="w-4 h-4 text-purple-600" />
-                          <span>HAPP (crypt5)</span>
+                          <span>HAPP (crypt4)</span>
                         </span>
                         <div className="flex items-center gap-1">
                           <button
@@ -2924,7 +2924,7 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
                             onClick={() =>
                               setGatewayQrModal({
                                 url: gatewayEncodedResult.happUrl,
-                                title: 'HAPP (crypt5) Ссылка подписки',
+                                title: 'HAPP (crypt4) Ссылка подписки',
                                 format: 'happ',
                               })
                             }
@@ -2952,7 +2952,7 @@ export const KeyProcessorView: React.FC<KeyProcessorViewProps> = ({
                         {gatewayEncodedResult.happUrl}
                       </div>
                       <div className="text-[10px] text-slate-500">
-                        Шифрованная ссылка протокола HAPP crypt5 для мгновенного импорта в 1 клик.
+                        Локально зашифрованная ссылка HAPP crypt4 для мгновенного импорта в 1 клик.
                       </div>
                     </div>
                   )}

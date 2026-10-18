@@ -43,7 +43,7 @@ import {
   MoreVertical,
   CheckCircle
 } from 'lucide-react';
-import { BotUser, SystemStatus } from '../types';
+import { BotUser, GitSourceItem, SystemStatus } from '../types';
 import { 
   simulateTier, 
   terminateUserSubscription,
@@ -58,6 +58,7 @@ import {
 
 interface UsersChannelViewProps {
   users: BotUser[];
+  gitSources: GitSourceItem[];
   status: SystemStatus | null;
   centralContent?: string;
   onSyncChannel: () => Promise<void>;
@@ -65,7 +66,7 @@ interface UsersChannelViewProps {
   onSyncCentralToSubscribers?: () => Promise<any>;
   onForceResyncUser?: (id: string) => Promise<any>;
   onAddUser: (user: any) => Promise<void>;
-  onDeleteUser: (id: string) => Promise<void>;
+  onDeleteUser: (id: string) => Promise<{ warning?: string } | void>;
   onMuteUser: (id: string, durationMinutes: number) => Promise<void>;
   onUnmuteUser: (id: string) => Promise<void>;
   onBlockUser: (id: string, reason?: string) => Promise<void>;
@@ -82,6 +83,7 @@ interface UsersChannelViewProps {
 
 export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
   users,
+  gitSources,
   status,
   onSyncChannel,
   onSyncAllChannelSubscribers,
@@ -104,11 +106,13 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterTab, setFilterTab] = useState<'all' | 'inconsistent' | 'active' | 'admins' | 'tier1' | 'tier2' | 'tier3' | 'device_locked' | 'muted' | 'blocked' | 'channel_left' | 'channel_exclusion'>('all');
+  const [sourceFilter, setSourceFilter] = useState<string>('all');
   const [resyncingUserId, setResyncingUserId] = useState<string | null>(null);
   const [resyncSuccessMsg, setResyncSuccessMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSyncingChannelSubscribers, setIsSyncingChannelSubscribers] = useState(false);
   const [isSyncingCentralSubs, setIsSyncingCentralSubs] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [channelSyncResultAlert, setChannelSyncResultAlert] = useState<{
     type: 'success' | 'warning' | 'error';
     text: string;
@@ -403,7 +407,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
   const [newUserName, setNewUserName] = useState('');
   const [newUserFirst, setNewUserFirst] = useState('');
   const [newUserMembership, setNewUserMembership] = useState('member');
-  const [newUserSubName, setNewUserSubName] = useState('HAPP (crypt5) - VLESS VIP');
+  const [newUserSubName, setNewUserSubName] = useState('HAPP (crypt4) - VLESS VIP');
   const [newUserSubType, setNewUserSubType] = useState('happ');
 
   const activeBot = status?.bots?.activeBot;
@@ -473,7 +477,22 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
 
   const handleCopyLink = (u: BotUser, e: React.MouseEvent) => {
     e.stopPropagation();
-    const url = u.finalSubscriptionUrl || u.clckUrl || `${window.location.origin}/api/sub/${u.subscriptionToken}`;
+    const url = u.subscriptionType === 'incy'
+      ? [u.clckUrl, u.finalSubscriptionUrl].find((candidate) =>
+          /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(candidate || '')
+        )
+      : [u.finalSubscriptionUrl, u.clckUrl].find((candidate) =>
+          /^happ:\/\/crypt[345]\//i.test(candidate || '')
+        );
+    if (!url) {
+      setChannelSyncResultAlert({
+        type: 'error',
+        text: u.subscriptionType === 'incy'
+          ? 'Короткая ссылка INCY clck.ru еще не создана. Синхронизируйте ссылку и попробуйте снова.'
+          : 'Для пользователя пока не сформирована ссылка HAPP.',
+      });
+      return;
+    }
     navigator.clipboard.writeText(url);
     setCopiedId(u.subscriptionToken);
     setTimeout(() => setCopiedId(null), 2000);
@@ -545,6 +564,20 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
     return { isInconsistent: false };
   };
 
+  const handleDeleteUser = async (user: BotUser) => {
+    setDeletingUserId(user.id);
+    try {
+      const result = await onDeleteUser(user.id);
+      if (result?.warning) {
+        alert(result.warning);
+      }
+    } catch (err: any) {
+      alert(err.message || `Не удалось удалить подписку пользователя ${user.telegramId}`);
+    } finally {
+      setDeletingUserId(null);
+    }
+  };
+
   const handleForceResync = async (user: BotUser) => {
     setResyncingUserId(user.id);
     try {
@@ -565,8 +598,29 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
   };
 
   const inconsistentUsersCount = users.filter((u) => checkUserInconsistent(u).isInconsistent).length;
+  const subscriptionSources = gitSources.filter((source) => ['moshub', 'sourcecraft', 'gitverse', 'gitflic'].includes(source.provider));
+  const getUserSourceId = (user: BotUser) => user.subscriptionSourceId || user.sourceSubscriptions?.[user.sourceSubscriptions.length - 1]?.sourceId;
+  const getSourceClasses = (source: GitSourceItem, selected: boolean) => {
+    const colors: Record<string, { active: string; idle: string }> = {
+      sourcecraft: { active: 'bg-orange-600 text-white', idle: 'bg-orange-50 text-orange-800 border border-orange-200 hover:bg-orange-100' },
+      gitflic: { active: 'bg-blue-600 text-white', idle: 'bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100' },
+      gitverse: { active: 'bg-stone-800 text-white', idle: 'bg-stone-100 text-stone-800 border border-stone-300 hover:bg-stone-200' },
+      moshub: { active: 'bg-violet-600 text-white', idle: 'bg-violet-50 text-violet-800 border border-violet-200 hover:bg-violet-100' },
+    };
+    const color = colors[source.provider];
+    return selected ? color.active : color.idle;
+  };
+
+  const isChannelAdminUser = (user: BotUser) =>
+    Boolean(user.isAdmin || ['creator', 'administrator'].includes(user.channelMembership));
+  const isChannelLeftUser = (user: BotUser) =>
+    !isChannelAdminUser(user) && (user.channelMembership === 'left' || user.status === 'channel_inactive');
 
   const filteredUsers = users.filter((u) => {
+    const sourceMatches = sourceFilter === 'all' ||
+      u.sourceSubscriptions?.some((subscription) => subscription.sourceId === sourceFilter) ||
+      getUserSourceId(u) === sourceFilter;
+    if (!sourceMatches) return false;
     const matchesSearch =
       (u.username?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
       (u.firstName?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
@@ -576,13 +630,13 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
     if (filterTab === 'inconsistent') return matchesSearch && checkUserInconsistent(u).isInconsistent;
     if (filterTab === 'active') return matchesSearch && u.status === 'active' && !u.isBlocked;
     if (filterTab === 'admins') return matchesSearch && (u.isAdmin || ['creator', 'administrator'].includes(u.channelMembership));
-    if (filterTab === 'tier1') return matchesSearch && (u.channelMembership === 'left' || u.status === 'channel_inactive' || u.status === 'bot_blocked' || u.status === 'unsubscribed');
+    if (filterTab === 'tier1') return matchesSearch && (isChannelLeftUser(u) || u.status === 'bot_blocked' || (u.status === 'unsubscribed' && !isChannelAdminUser(u)));
     if (filterTab === 'tier2') return matchesSearch && ((u.status === 'muted' || (u.mutedUntil && new Date(u.mutedUntil) > new Date())) && !u.isBlocked);
     if (filterTab === 'tier3') return matchesSearch && (u.isBlocked || u.status === 'blocked' || (u.deviceViolationAttempts && u.deviceViolationAttempts >= 3));
     if (filterTab === 'device_locked') return matchesSearch && (u.deviceLocked || !!u.boundDevice);
     if (filterTab === 'muted') return matchesSearch && u.status === 'muted';
     if (filterTab === 'blocked') return matchesSearch && (u.status === 'blocked' || u.isBlocked);
-    if (filterTab === 'channel_left') return matchesSearch && (u.channelMembership === 'left' || u.status === 'channel_inactive');
+    if (filterTab === 'channel_left') return matchesSearch && isChannelLeftUser(u);
     if (filterTab === 'channel_exclusion') return matchesSearch && Boolean(u.isChannelExclusion);
     return matchesSearch;
   });
@@ -708,7 +762,33 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
       {/* Users Management Table Card */}
       <div className="bg-white border border-stone-200 rounded-2xl shadow-xs overflow-hidden">
         {/* Table Top Controls & Filter Tabs */}
-        <div className="p-5 border-b border-stone-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="p-5 border-b border-stone-200 space-y-3">
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+            <button
+              onClick={() => setSourceFilter('all')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${
+                sourceFilter === 'all' ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+              }`}
+            >
+              Все источники ({users.length})
+            </button>
+            {subscriptionSources.map((source) => {
+              const count = users.filter((user) =>
+                user.sourceSubscriptions?.some((subscription) => subscription.sourceId === source.id) ||
+                getUserSourceId(user) === source.id
+              ).length;
+              return (
+                <button
+                  key={source.id}
+                  onClick={() => setSourceFilter(source.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${getSourceClasses(source, sourceFilter === source.id)}`}
+                >
+                  {source.name} ({count})
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar">
             <button
               onClick={() => setFilterTab('all')}
@@ -755,7 +835,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                 filterTab === 'tier1' ? 'bg-stone-800 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
               }`}
             >
-              <span>Уровень 1: Отписка ({users.filter(u => u.channelMembership === 'left' || u.status === 'channel_inactive' || u.status === 'bot_blocked' || u.status === 'unsubscribed').length})</span>
+              <span>Уровень 1: Отписка ({users.filter(u => isChannelLeftUser(u) || u.status === 'bot_blocked' || (u.status === 'unsubscribed' && !isChannelAdminUser(u))).length})</span>
             </button>
             <button
               onClick={() => setFilterTab('tier2')}
@@ -837,6 +917,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
               <Plus className="h-3.5 w-3.5" />
               <span>Добавить</span>
             </button>
+          </div>
           </div>
         </div>
 
@@ -1062,11 +1143,12 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
               {filteredUsers.map((u) => {
                 const isMuted = u.status === 'muted';
                 const isBlocked = u.status === 'blocked' || u.isBlocked;
-                const isLeft = u.channelMembership === 'left' || u.status === 'channel_inactive';
+                const isLeft = isChannelLeftUser(u);
                 const isBotBlocked = u.status === 'bot_blocked';
-                const isSuspended = isLeft || isBotBlocked || u.status === 'unsubscribed';
+                const isSuspended = isLeft || isBotBlocked || (u.status === 'unsubscribed' && !isChannelAdminUser(u));
                 const receivedText = u.receivedAt ? new Date(u.receivedAt).toLocaleString('ru-RU') : 'Ещё не получена';
                 const isSelected = selectedUserIds.has(u.id);
+                const userSource = subscriptionSources.find((source) => source.id === getUserSourceId(u));
 
                 return (
                   <tr
@@ -1116,6 +1198,11 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                       </div>
                       <div className="text-[11px] text-stone-400">
                         {u.username ? `@${u.username}` : `ID: ${u.telegramId}`}
+                        {userSource && (
+                          <span className={`ml-2 inline-block rounded px-1.5 py-0.5 font-semibold ${getSourceClasses(userSource, true)}`}>
+                            {userSource.name}
+                          </span>
+                        )}
                       </div>
                     </td>
 
@@ -1124,7 +1211,9 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                       <div className="font-semibold text-stone-800 flex items-center space-x-1.5">
                         <span>{u.subscriptionName || 'Стандартная подписка'}</span>
                         {u.subscriptionType === 'happ' && (
-                          <span className="px-1.5 py-0.2 bg-indigo-50 text-indigo-700 rounded text-[10px] font-bold">crypt5</span>
+                          <span className="px-1.5 py-0.2 bg-indigo-50 text-indigo-700 rounded text-[10px] font-bold">
+                            {u.finalSubscriptionUrl?.match(/^happ:\/\/(crypt[345])\//i)?.[1] || 'HAPP'}
+                          </span>
                         )}
                         {u.subscriptionType === 'incy' && (
                           <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold">qsen.ru</span>
@@ -1483,7 +1572,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                       <button
                         onClick={(e) => handleCopyLink(u, e)}
                         className="p-1.5 rounded-lg border border-stone-200 hover:bg-stone-100 text-stone-600"
-                        title="Скопировать готовую ссылку подписки (HAPP crypt5 или INCY clck.ru)"
+                        title="Скопировать готовую ссылку подписки (HAPP crypt4 или INCY clck.ru)"
                       >
                         {copiedId === u.subscriptionToken ? (
                           <Check className="h-3.5 w-3.5 text-emerald-600" />
@@ -1503,15 +1592,18 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
 
                       {/* Delete */}
                       <button
+                        disabled={deletingUserId === u.id}
                         onClick={() => {
                           if (confirm(`Удалить пользователя ${u.firstName}?`)) {
-                            onDeleteUser(u.id);
+                            void handleDeleteUser(u);
                           }
                         }}
-                        className="p-1.5 rounded-lg border border-stone-200 hover:bg-rose-50 hover:text-rose-600 text-stone-400"
+                        className="p-1.5 rounded-lg border border-stone-200 hover:bg-rose-50 hover:text-rose-600 text-stone-400 disabled:opacity-50"
                         title="Удалить"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        {deletingUserId === u.id
+                          ? <RefreshCw className="h-3.5 w-3.5 text-rose-500 animate-spin" />
+                          : <Trash2 className="h-3.5 w-3.5" />}
                       </button>
                     </td>
                   </tr>
@@ -1747,7 +1839,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                     onChange={(e) => setNewUserSubType(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900"
                   >
-                    <option value="happ">HAPP (crypt5)</option>
+                    <option value="happ">HAPP (crypt4)</option>
                     <option value="incy">INCY (qsen-short)</option>
                     <option value="standard">Standard V2Ray</option>
                   </select>

@@ -386,13 +386,13 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
         name: simUser.name,
         username: simUser.username,
         id: simUser.telegramId,
-        subTypeName: simUser.subscriptionType === 'happ' ? 'HAPP (crypt5)' : 'INCY',
-        format: simUser.subscriptionType === 'happ' ? 'HAPP (crypt5)' : 'INCY',
+        subTypeName: simUser.subscriptionType === 'happ' ? 'HAPP (crypt4)' : 'INCY',
+        format: simUser.subscriptionType === 'happ' ? 'HAPP (crypt4)' : 'INCY',
         totalServers: 10,
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         tz: 'МСК',
-        key: simUser.subscriptionType === 'happ' ? 'happ://crypt5/preview-key-simulator-99' : 'https://gitverse.ru/api/raw/preview-incy-simulator',
-        link: simUser.subscriptionType === 'happ' ? 'happ://crypt5/preview-key-simulator-99' : 'https://gitverse.ru/api/raw/preview-incy-simulator',
+        key: simUser.subscriptionType === 'happ' ? 'happ://crypt4/preview-key-simulator-99' : 'https://gitverse.ru/api/raw/preview-incy-simulator',
+        link: simUser.subscriptionType === 'happ' ? 'happ://crypt4/preview-key-simulator-99' : 'https://gitverse.ru/api/raw/preview-incy-simulator',
         hours: activeBot.selfDeleteHours || 72,
         device: simUser.boundDevice || 'iPhone 15 Pro / Shadowrocket',
         boundDate: new Date().toLocaleString('ru-RU'),
@@ -989,7 +989,7 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
                       value={chooseFormatMsg}
                       onChange={(e) => setChooseFormatMsg(e.target.value)}
                       className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 focus:bg-white text-stone-900 text-xs"
-                      placeholder="Выберите формат вашей персональной подписки: 1) HAPP (crypt5) 2) INCY / VLESS..."
+                      placeholder="Выберите формат вашей персональной подписки: 1) HAPP (crypt4) 2) INCY / VLESS..."
                     />
                   </div>
 
@@ -1130,7 +1130,7 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
                           Генерировать и показывать QR-код в сообщении с подпиской
                         </span>
                         <span className="text-[11px] text-stone-500 block leading-relaxed mt-0.5">
-                          Если выключено, бот выдает только готовую персональную ссылку (HAPP crypt5 или INCY) без блока QR-кода.
+                          Если выключено, бот выдает только готовую персональную ссылку (HAPP crypt4 или INCY) без блока QR-кода.
                         </span>
                       </div>
                     </label>

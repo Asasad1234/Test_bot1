@@ -18,7 +18,6 @@ import {
   Clock,
   MessageSquare,
   Sparkles,
-  Link,
   Server,
   Key,
   QrCode,
@@ -33,11 +32,19 @@ import {
   Zap,
   Globe
 } from 'lucide-react';
-import { GitSourceItem, ManagedBotItem, GitProvider } from '../types';
+import { GitSourceItem, ManagedBotItem, GitProvider, HappCryptVersion } from '../types';
 import { DockerConfigView } from './DockerConfigView';
 import { VercelConfigView } from './VercelConfigView';
 import { RelayGatewayView } from './RelayGatewayView';
-import { fetchFirebaseStatus, syncFirebase, reloadFirebase, setDefaultGitSource, makeCentralGitSource } from '../services/api';
+import {
+  fetchFirebaseStatus,
+  syncFirebase,
+  reloadFirebase,
+  setDefaultGitSource,
+  makeCentralGitSource,
+  fetchSubscriptionSettings,
+  saveHappCryptVersion,
+} from '../services/api';
 
 const BOT_BUTTON_COLORS = [
   { id: 'indigo', name: 'Индиго', bg: 'bg-indigo-600', hex: '#4f46e5' },
@@ -86,6 +93,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'git' | 'bots' | 'backup' | 'docker' | 'vercel' | 'firebase' | 'relay'>('git');
   const [isRestoring, setIsRestoring] = useState(false);
+  const [happCryptVersion, setHappCryptVersion] = useState<HappCryptVersion>('crypt4');
+  const [savedHappCryptVersion, setSavedHappCryptVersion] = useState<HappCryptVersion>('crypt4');
+  const [isHappCryptSettingsLoading, setIsHappCryptSettingsLoading] = useState(true);
+  const [isHappCryptSaving, setIsHappCryptSaving] = useState(false);
+  const [happCryptSettingsError, setHappCryptSettingsError] = useState<string | null>(null);
 
   // Optimistic UI state overrides for zero-latency feedback
   const [optimisticBotOverrides, setOptimisticBotOverrides] = useState<Record<string, Partial<ManagedBotItem>>>({});
@@ -107,6 +119,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       loadFirebaseStatus();
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    fetchSubscriptionSettings()
+      .then(({ happCryptVersion: version }) => {
+        setHappCryptVersion(version);
+        setSavedHappCryptVersion(version);
+        setHappCryptSettingsError(null);
+      })
+      .catch((err: any) => setHappCryptSettingsError(err.message || 'Не удалось загрузить настройки формата HAPP'))
+      .finally(() => setIsHappCryptSettingsLoading(false));
+  }, []);
 
   const loadFirebaseStatus = async () => {
     setIsFirebaseLoading(true);
@@ -174,6 +197,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const showToast = (type: 'success' | 'error', text: string) => {
     setFeedbackMsg({ type, text });
     setTimeout(() => setFeedbackMsg(null), 5000);
+  };
+
+  const handleSaveHappCryptVersion = async () => {
+    setIsHappCryptSaving(true);
+    try {
+      const result = await saveHappCryptVersion(happCryptVersion);
+      setHappCryptVersion(result.happCryptVersion);
+      setSavedHappCryptVersion(result.happCryptVersion);
+      setHappCryptSettingsError(null);
+      showToast('success', result.message);
+      if (onRefreshData) await onRefreshData();
+    } catch (err: any) {
+      setHappCryptSettingsError(err.message || 'Не удалось обновить ссылки HAPP');
+      showToast('error', err.message || 'Не удалось обновить ссылки HAPP');
+    } finally {
+      setIsHappCryptSaving(false);
+    }
   };
 
   const handleQuickSaveGitToken = async (source: GitSourceItem) => {
@@ -885,6 +925,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <Plus className="h-3.5 w-3.5 text-amber-400" />
               <span>Добавить бота</span>
             </button>
+          </div>
+
+          <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4 space-y-3">
+            <div>
+              <h4 className="text-sm font-bold text-indigo-950">Формат ссылок HAPP</h4>
+              <p className="mt-1 text-xs text-indigo-800">
+                Выберите crypt3, crypt4 или crypt5. Сохранение обновит формат ссылок у всех уже выданных HAPP-подписок.
+                Ссылки INCY всегда сокращаются через clck.ru.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={happCryptVersion}
+                disabled={isHappCryptSettingsLoading || isHappCryptSaving}
+                onChange={(e) => setHappCryptVersion(e.target.value as HappCryptVersion)}
+                className="min-w-48 rounded-xl border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-stone-900"
+              >
+                <option value="crypt3">HAPP crypt3 (CH)</option>
+                <option value="crypt4">HAPP crypt4</option>
+                <option value="crypt5">HAPP crypt5</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleSaveHappCryptVersion}
+                disabled={
+                  isHappCryptSettingsLoading ||
+                  isHappCryptSaving ||
+                  happCryptVersion === savedHappCryptVersion
+                }
+                className="rounded-xl bg-indigo-700 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isHappCryptSaving ? 'Обновление ссылок…' : 'Сохранить и обновить HAPP-ссылки'}
+              </button>
+              {isHappCryptSettingsLoading && <span className="text-xs text-indigo-700">Загрузка настройки…</span>}
+            </div>
+            {happCryptSettingsError && (
+              <p className="text-xs font-semibold text-rose-700">{happCryptSettingsError}</p>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1630,7 +1708,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
 
               <div>
-                <label className="font-bold text-stone-700 block mb-1">API Токен / Ключ доступа *</label>
+                <label className="font-bold text-stone-700 block mb-1">API токен / ключ доступа</label>
                 <input
                   type="password"
                   value={editingGit.token || ''}
@@ -1639,6 +1717,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 font-mono"
                 />
               </div>
+
+              {['gitflic', 'moshub', 'gitlab'].includes(editingGit.provider || '') && (
+                <div>
+                  <label className="font-bold text-stone-700 block mb-1">Логин для Git HTTPS</label>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    value={editingGit.username || ''}
+                    onChange={(e) => setEditingGit({ ...editingGit, username: e.target.value })}
+                    placeholder="Имя пользователя аккаунта, не namespace репозитория"
+                    className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 font-mono"
+                  />
+                  <span className="text-[10px] text-stone-400">
+                    Используется вместе с токеном при git clone/push; если не заполнено, применяется логин по умолчанию провайдера.
+                  </span>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1977,25 +2072,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   type="checkbox"
                   checked={editingBot.deletePreviousMessageOnStep ?? false}
                   onChange={(e) => setEditingBot({ ...editingBot, deletePreviousMessageOnStep: e.target.checked })}
-                  className="h-4 w-4 rounded border-stone-300 text-stone-900 focus:ring-stone-500"
-                />
-              </div>
-
-              {/* Shorten INCY links via clck.ru / qsen */}
-              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-stone-800 block flex items-center space-x-1.5">
-                    <span>Сокращать ссылки подписки INCY (через clck.ru / qsen)</span>
-                    <Link className="h-3.5 w-3.5 text-blue-600" />
-                  </span>
-                  <span className="text-[11px] text-stone-500">
-                    Автоматически преобразует длинный GitVerse RAW URL подписки INCY в компактную ссылку вида https://clck.ru/3VnDPe (вкл по умолчанию)
-                  </span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={editingBot.shortenIncyUrl ?? true}
-                  onChange={(e) => setEditingBot({ ...editingBot, shortenIncyUrl: e.target.checked })}
                   className="h-4 w-4 rounded border-stone-300 text-stone-900 focus:ring-stone-500"
                 />
               </div>

@@ -32,8 +32,7 @@ import {
   resolveFeedbackUnbind, 
   terminateFeedbackUser,
   deleteFeedbackRequest,
-  generateBotUnblockRequest,
-  approveReissueRequest
+  generateBotUnblockRequest
 } from '../services/api';
 
 interface FeedbackViewProps {
@@ -189,25 +188,6 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
     }
   };
 
-  const handleApproveReissue = async (reqItem: FeedbackRequest) => {
-    setProcessingId(reqItem.id);
-    try {
-      const res = await approveReissueRequest(reqItem.id);
-      setActionSuccessMsg(
-        res.message || `Подписка @${reqItem.username || reqItem.telegramId} перевыпущена и подтверждена.`
-      );
-      setRequests((prev) =>
-        prev.map((r) => (r.id === reqItem.id ? { ...r, status: 'resolved', resolvedAt: new Date().toISOString() } : r))
-      );
-      if (onRefreshStats) onRefreshStats();
-      setTimeout(() => setActionSuccessMsg(null), 6000);
-    } catch (err: any) {
-      alert(err.message || 'Не удалось подтвердить перевыпуск');
-    } finally {
-      setProcessingId(null);
-    }
-  };
-
   const handleDelete = async (id: string) => {
     if (!confirm('Удалить эту заявку из истории обратной связи?')) return;
     try {
@@ -236,7 +216,6 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
   const pendingCount = requests.filter((r) => r.status === 'pending').length;
   const resolvedCount = requests.filter((r) => r.status === 'resolved').length;
   const unblockPendingCount = requests.filter((r) => r.type === 'unblock_request' && r.status === 'pending').length;
-  const reissuePendingCount = requests.filter((r) => r.type === 'reissue_request' && r.status === 'pending').length;
 
   return (
     <div id="feedback-view-container" className="space-y-6">
@@ -415,79 +394,6 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
           <button onClick={() => setActionSuccessMsg(null)} className="text-emerald-700 hover:text-emerald-900 font-bold ml-4 cursor-pointer">
             ✕
           </button>
-        </div>
-      )}
-
-      {reissuePendingCount > 0 && (
-        <div id="reissue-request-panel" className="bg-amber-50/80 border-2 border-amber-300/80 rounded-2xl p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3.5">
-            <div className="flex items-center space-x-2.5">
-              <div className="h-8 w-8 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold">
-                <Zap className="h-4 w-4" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-amber-950">
-                  Заявки на перевыпуск подписки ({reissuePendingCount} ожидают согласования)
-                </h3>
-                <p className="text-[11px] text-amber-800">
-                  Пользователь запросил смену формата или перевыпуск, но новая подписка выдаётся только после вашего подтверждения.
-                </p>
-              </div>
-            </div>
-            <span className="px-2.5 py-1 rounded-full bg-amber-200 text-amber-900 text-xs font-bold shrink-0">
-              На согласование
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-            {requests
-              .filter((r) => r.type === 'reissue_request' && r.status === 'pending')
-              .map((r) => {
-                const isProcessing = processingId === r.id;
-                const nickname = r.username ? `@${r.username}` : r.firstName ? `${r.firstName}` : `ID: ${r.telegramId}`;
-                const formatName = r.targetFormat === 'happ' ? 'HAPP (crypt5)' : 'INCY';
-                const timestampStr = new Date(r.createdAt).toLocaleString('ru-RU');
-
-                return (
-                  <div key={`reissue-${r.id}`} className="bg-white border border-amber-200 rounded-xl p-4 shadow-xs flex flex-col justify-between space-y-3">
-                    <div>
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-sm text-stone-900">{nickname}</span>
-                        <span className="text-[10px] font-mono text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md font-bold">{formatName}</span>
-                      </div>
-                      <div className="mt-2 text-xs space-y-1">
-                        <p className="text-stone-700">
-                          <strong className="text-amber-900">Запрос:</strong> {r.message}
-                        </p>
-                        <p className="text-[11px] text-stone-500 flex items-center space-x-1">
-                          <Clock className="h-3 w-3 text-stone-400" />
-                          <span>Время: {timestampStr}</span>
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-amber-100">
-                      <button
-                        onClick={() => handleApproveReissue(r)}
-                        disabled={isProcessing}
-                        className="py-1.5 px-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center space-x-1 transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        <span>{isProcessing ? '...' : 'Подтвердить'}</span>
-                      </button>
-                      <button
-                        onClick={() => handleDelete(r.id)}
-                        disabled={isProcessing}
-                        className="py-1.5 px-2.5 rounded-xl bg-stone-200 hover:bg-stone-300 text-stone-800 font-bold text-xs flex items-center justify-center space-x-1 transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>Удалить</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
         </div>
       )}
 

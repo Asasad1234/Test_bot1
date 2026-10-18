@@ -14,7 +14,8 @@ import {
   DockerConfig,
   SyncHealthReport,
   SystemLogEntry,
-  DeepAuditResult
+  DeepAuditResult,
+  HappCryptVersion
 } from '../types';
 
 const API_BASE = '/api';
@@ -38,8 +39,11 @@ export async function saveGitSource(source: Partial<GitSourceItem>): Promise<{ s
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(source),
   });
-  if (!res.ok) throw new Error('Ошибка сохранения источника Git');
-  return res.json();
+  const data = await res.json();
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || 'Ошибка сохранения источника Git');
+  }
+  return data;
 }
 
 export async function testGitSource(id: string): Promise<{ success: boolean; message: string; source: GitSourceItem }> {
@@ -81,6 +85,31 @@ export async function fetchBots(): Promise<{ bots: ManagedBotItem[]; activeBotId
   const res = await fetch(`${API_BASE}/bots`);
   if (!res.ok) throw new Error('Ошибка загрузки Telegram ботов');
   return res.json();
+}
+
+export async function fetchSubscriptionSettings(): Promise<{ happCryptVersion: HappCryptVersion }> {
+  const res = await fetch(`${API_BASE}/subscription-settings`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'Ошибка загрузки формата HAPP');
+  return data;
+}
+
+export async function saveHappCryptVersion(happCryptVersion: HappCryptVersion): Promise<{
+  success: boolean;
+  happCryptVersion: HappCryptVersion;
+  updatedLinks: number;
+  message: string;
+}> {
+  const res = await fetch(`${API_BASE}/subscription-settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ happCryptVersion }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || 'Ошибка обновления формата HAPP');
+  }
+  return data;
 }
 
 export async function saveBot(bot: Partial<ManagedBotItem>): Promise<{ success: boolean; bot: ManagedBotItem; bots: ManagedBotItem[] }> {
@@ -376,10 +405,11 @@ export async function bindUserDevice(id: string, clientName?: string): Promise<{
   return data;
 }
 
-export async function deleteUser(id: string): Promise<{ success: boolean }> {
+export async function deleteUser(id: string): Promise<{ success: boolean; message?: string; warning?: string }> {
   const res = await fetch(`${API_BASE}/users/${id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Ошибка удаления пользователя');
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'Ошибка удаления пользователя');
+  return data;
 }
 
 // Broadcasting
@@ -401,25 +431,33 @@ export async function fetchCentralFile(): Promise<CentralSubscriptionFile & { st
   return res.json();
 }
 
-export async function saveCentralFile(payload: Partial<CentralSubscriptionSavePayload> & { content: string }): Promise<{ success: boolean; message: string; centralFile: CentralSubscriptionFile & { stats: any } }> {
+export async function saveCentralFile(payload: Partial<CentralSubscriptionSavePayload> & { content: string }): Promise<{
+  success: boolean;
+  message: string;
+  centralFile: CentralSubscriptionFile & { stats: any };
+  syncResult?: { syncedUsers: number; syncedExclusions: number; durationMs: number; errors: string[] };
+}> {
   const res = await fetch(`${API_BASE}/central-file`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error('Ошибка сохранения подписки');
-  return res.json();
+  const data = await res.json();
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || 'Ошибка сохранения подписки');
+  }
+  return data;
 }
 
-export async function syncCentralFileWithGit(direction: 'push' | 'pull', centralRawUrl?: string): Promise<{ success: boolean; message: string; syncedAt: string; stats?: any; content?: string }> {
+export async function syncCentralFileWithGit(direction: 'push' | 'pull', centralRawUrl?: string, content?: string): Promise<{ success: boolean; message: string; syncedAt: string; stats?: any; content?: string }> {
   const res = await fetch(`${API_BASE}/central-file/sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ direction, centralRawUrl }),
+    body: JSON.stringify({ direction, centralRawUrl, content }),
   });
   const data = await res.json();
   if (!res.ok || data.success === false) {
-    throw new Error(data.message || data.error || 'Ошибка синхронизации с репозиторием GitVerse');
+    throw new Error(data.message || data.error || 'Ошибка синхронизации с Git-репозиторием');
   }
   return data;
 }
@@ -433,12 +471,24 @@ export async function syncCentralToSubscribers(): Promise<{
     syncedExclusions: number;
     durationMs: number;
     errors: string[];
+    totalUsers: number;
+    centralContentBytes: number;
+    centralContentHash: string;
+    skippedUsers: {
+      noActiveSubscription: number;
+      inactiveStatus: number;
+      leftChannel: number;
+      blocked: number;
+      muted: number;
+      detachedFromCentral: number;
+      missingFilePath: number;
+    };
     skippedUnchanged?: number;
     pushedCount?: number;
   };
   stats: any;
 }> {
-  const res = await fetch(`${API_BASE}/central-file/sync-subscribers?force=true`, {
+  const res = await fetch(`${API_BASE}/central-file/sync-subscribers?force=true&wait=true`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
@@ -580,15 +630,6 @@ export async function terminateFeedbackUser(requestId: string): Promise<{ succes
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.message || 'Ошибка аннулирования подписки');
-  return data;
-}
-
-export async function approveReissueRequest(requestId: string): Promise<{ success: boolean; message: string; user?: BotUser; request: FeedbackRequest; finalUrl?: string }> {
-  const res = await fetch(`${API_BASE}/feedback/${requestId}/approve-reissue`, {
-    method: 'POST',
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.message || 'Ошибка подтверждения перевыпуска');
   return data;
 }
 
@@ -1338,10 +1379,3 @@ export async function triggerManualGatewayAudit(): Promise<{
 
 // Alias for manual gateway sync pass
 export const runGatewayPass = triggerManualGatewayAudit;
-
-
-
-
-
-
-

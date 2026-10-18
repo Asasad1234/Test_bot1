@@ -4,6 +4,7 @@ export type MediaType = 'none' | 'photo' | 'video' | 'document';
 export type UserSubStatus = 'active' | 'blocked' | 'muted' | 'channel_inactive' | 'unsubscribed' | 'bot_blocked';
 export type ChannelMembershipStatus = 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked';
 export type SubscriptionType = 'happ' | 'incy' | 'single_device_ru' | 'standard' | 'exception';
+export type HappCryptVersion = 'crypt3' | 'crypt4' | 'crypt5';
 
 export interface GitSourceItem {
   id: string;
@@ -57,7 +58,6 @@ export interface ManagedBotItem {
   showQrCode?: boolean; // Toggle QR code display in bot messages
   enableFireworks?: boolean; // Toggle visual fireworks / confetti on sub issue
   buttonColor?: string; // e.g. 'indigo' | 'emerald' | 'amber' | 'rose' | 'sky' | 'violet' | 'stone'
-  shortenIncyUrl?: boolean; // Default true: shorten INCY links via qsen/clck.ru
   channelNoticeMessage?: string; // Custom message when channels subscription required
   chooseFormatMessage?: string; // Custom message when choosing format (HAPP / INCY)
   subIssuedMessage?: string; // Custom template for issued subscription
@@ -178,6 +178,7 @@ export interface CentralSubscriptionSavePayload {
 
 export interface RepoUserFile {
   id?: string;
+  sourceId?: string;
   userId?: string | null;
   telegramId?: number | null;
   username?: string | null;
@@ -207,7 +208,7 @@ export interface BotUser {
   lastName?: string;
   joinedAt: string;
   receivedAt: string | null; // exact timestamp when subscription was claimed
-  subscriptionName: string; // e.g. "HAPP (crypt5) - VLESS VIP"
+  subscriptionName: string; // e.g. "HAPP (crypt4) - VLESS VIP"
   subscriptionType: SubscriptionType;
   status: UserSubStatus;
   mutedUntil: string | null; // ISO timestamp if muted
@@ -227,6 +228,16 @@ export interface BotUser {
   lastActiveAt: string;
   personalNodes: string[]; // custom nodes injected only for this user
   isException?: boolean;
+  subscriptionSourceId?: string;
+  sourceSubscriptions?: Array<{
+    sourceId: string;
+    filePath: string;
+    rawUrl: string;
+    format: 'happ' | 'incy';
+    finalUrl: string;
+    updatedAt: string;
+  }>;
+  pendingSubscriptionReissue?: boolean;
   gitFilePath?: string;
   gitRawUrl?: string;
   finalSubscriptionUrl?: string;
@@ -285,8 +296,7 @@ export interface FeedbackRequest {
   telegramId: number;
   username?: string;
   firstName?: string;
-  type: 'unbind_device' | 'general_feedback' | 'unblock_request' | 'reissue_request';
-  targetFormat?: 'happ' | 'incy';
+  type: 'unbind_device' | 'general_feedback' | 'unblock_request';
   message: string;
   createdAt: string;
   status: 'pending' | 'resolved';

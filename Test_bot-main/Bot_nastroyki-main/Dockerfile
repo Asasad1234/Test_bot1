@@ -24,7 +24,7 @@ ENV AUTO_RESTART_HOURS=24
 ENV TZ=Europe/Moscow
 
 # Install curl for container healthcheck and bash for entrypoint
-RUN apk add --no-cache curl bash tzdata
+RUN apk add --no-cache curl bash git tzdata
 
 # Copy package files and install production dependencies
 COPY package*.json ./
