@@ -34,6 +34,12 @@ export function getAppBaseUrl(req?: any): string {
   if (process.env.APP_URL && !process.env.APP_URL.includes('localhost')) {
     return process.env.APP_URL.replace(/\/+$/, '');
   }
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+  }
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    return `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`.replace(/\/+$/, '');
+  }
   if (req && req.get) {
     const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
     const host = req.get('host');
@@ -2073,7 +2079,11 @@ async function clckRedirectsTo(shortUrl: string, targetUrl: string): Promise<boo
   const location = response.headers.get('location');
   await response.body?.cancel();
   if (response.status < 300 || response.status >= 400 || !location) return false;
-  return new URL(location, shortUrl).href === new URL(targetUrl).href;
+  const redirectUrl = new URL(location, shortUrl);
+  const resolvedTarget = redirectUrl.hostname === 'sba.yandex.ru' && redirectUrl.pathname === '/redirect'
+    ? redirectUrl.searchParams.get('url')
+    : redirectUrl.href;
+  return Boolean(resolvedTarget && new URL(resolvedTarget).href === new URL(targetUrl).href);
 }
 
 function getUserSubscriptionTargetUrl(user: any): string {
@@ -2102,6 +2112,11 @@ function getUserSubscriptionTargetUrl(user: any): string {
     return `https://raw.sourcecraft.tech/raw/${repository}/${repoFileSha}/${filePath.replace(/^\/+/, '')}`;
   }
   return buildGitRawUrl(source, filePath);
+}
+
+function getUserSubscriptionGatewayUrl(user: BotUser): string {
+  const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
+  return `${getAppBaseUrl()}/api/sub/${encodeURIComponent(token)}`;
 }
 
 function isRepositoryRawUrl(source: GitSourceItem, rawUrl: string, filePath?: string): boolean {
@@ -2216,7 +2231,7 @@ async function getExistingCurrentSourceSubscription(
   if (!response.ok) return null;
   const remoteContent = await response.text();
   if (crypto.createHash('sha256').update(remoteContent).digest('hex') !== repoFile.contentHash) return null;
-  if (format === 'incy' && !(await clckRedirectsTo(finalUrl, rawUrl))) return null;
+  if (format === 'incy' && !(await clckRedirectsTo(finalUrl, getUserSubscriptionGatewayUrl(user)))) return null;
 
   user.subscriptionSourceId = source.id;
   user.gitFilePath = filePath;
@@ -2226,7 +2241,7 @@ async function getExistingCurrentSourceSubscription(
   user.finalSubscriptionUrl = finalUrl;
   user.finalUrl = finalUrl;
   user.clckUrl = finalUrl;
-  user.clckTargetUrl = rawUrl;
+  user.clckTargetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : rawUrl;
   saveStore();
 
   return { url: finalUrl, format, sourceName: source.name };
@@ -2305,7 +2320,7 @@ async function refreshUserSubscriptionLink(
   if (!source || !isRepositoryRawUrl(source, rawUrl, filePath)) {
     throw new Error(`Источник не вернул действительный RAW-адрес файла ${filePath}`);
   }
-  const targetUrl = rawUrl;
+  const targetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : rawUrl;
 
   if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
   let subscription = user.sourceSubscriptions.find(
@@ -2348,9 +2363,7 @@ async function refreshUserSubscriptionLink(
       subscription.finalUrl = finalUrl;
     }
   } else {
-    if (previousRawUrl === targetUrl && isClckShortUrl(previousFinalUrl)) {
-      finalUrl = previousFinalUrl;
-    } else if (isCurrentSource && user.clckTargetUrl === targetUrl && isClckShortUrl(user.clckUrl)) {
+    if (isCurrentSource && user.clckTargetUrl === targetUrl && isClckShortUrl(user.clckUrl)) {
       finalUrl = user.clckUrl;
     } else {
       finalUrl = await shortenIncyUrl(targetUrl, token);
@@ -2454,10 +2467,11 @@ async function resolveUserDisplayKey(user: any): Promise<string> {
     saveStore();
     return happUrl;
   } else {
-    const incyUrl = user.clckTargetUrl === targetBaseUrl && isClckShortUrl(user.clckUrl)
+    const gatewayUrl = getUserSubscriptionGatewayUrl(user);
+    const incyUrl = user.clckTargetUrl === gatewayUrl && isClckShortUrl(user.clckUrl)
       ? user.clckUrl
-      : await shortenIncyUrl(targetBaseUrl, token);
-    applyUserIncyShortUrl(user, targetBaseUrl, incyUrl);
+      : await shortenIncyUrl(gatewayUrl, token);
+    applyUserIncyShortUrl(user, gatewayUrl, incyUrl);
     saveStore();
     return incyUrl;
   }
@@ -3163,8 +3177,7 @@ async function ensureUserRepoFile(
     // HAPP wraps the assigned repository URL using the configured crypt format.
     finalUrl = buildHappCryptUrl(targetBaseUrl);
   } else {
-    // Format is INCY: direct gateway URL or direct GitVerse raw URL
-    finalUrl = await shortenIncyUrl(targetBaseUrl, tokenSafe);
+    finalUrl = await shortenIncyUrl(getUserSubscriptionGatewayUrl(user), tokenSafe);
   }
   if (format === 'happ' && !isHappUrlForVersion(finalUrl, store.happCryptVersion)) {
     throw new Error(`Не удалось сформировать HAPP-ссылку формата ${store.happCryptVersion}.`);
@@ -3222,7 +3235,7 @@ async function ensureUserRepoFile(
   user.finalSubscriptionUrl = finalUrl;
   user.finalUrl = finalUrl;
   user.clckUrl = finalUrl;
-  user.clckTargetUrl = targetBaseUrl;
+  user.clckTargetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : targetBaseUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY (VLESS)';
   user.hasActiveSubscription = true;
@@ -6320,7 +6333,7 @@ app.get('/api/users', async (req, res) => {
       user.subscriptionType === 'incy' &&
       (user.gitFilePath || user.gitRawUrl) &&
       (!isClckShortUrl(user.finalSubscriptionUrl) ||
-        user.clckTargetUrl !== getUserSubscriptionTargetUrl(user))
+        user.clckTargetUrl !== getUserSubscriptionGatewayUrl(user))
     ) {
       staleIncyUsers.push(user);
     }
@@ -6781,7 +6794,7 @@ app.post('/api/users/:id/shorten-clck', async (req, res) => {
   const user = store.users.find((u) => u.id === id || u.telegramId === Number(id));
   if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
 
-  const rawUrl = getUserSubscriptionTargetUrl(user);
+  const rawUrl = getUserSubscriptionGatewayUrl(user);
   let shortUrl: string;
   try {
     shortUrl = await shortenIncyUrl(rawUrl, user.subscriptionToken);
