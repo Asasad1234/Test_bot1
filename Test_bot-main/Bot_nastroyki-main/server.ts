@@ -2743,25 +2743,67 @@ async function batchCommitFilesViaGitCli(params: {
     await execFileAsync('git', ['config', 'user.name', owner || 'PulsAccess'], { cwd: repoDir });
     await execFileAsync('git', ['config', 'user.email', `${owner || 'bot'}@sourcecraft.dev`], { cwd: repoDir });
 
-    for (const f of files) {
-      const cleanPath = f.filePath.replace(/^\/+/, '');
-      const fullTargetFilePath = path.join(repoDir, cleanPath);
-      await fs.promises.mkdir(path.dirname(fullTargetFilePath), { recursive: true });
-      await fs.promises.writeFile(fullTargetFilePath, f.content, 'utf-8');
-      await execFileAsync('git', ['add', cleanPath], { cwd: repoDir, timeout: 10000 });
+    let lastPushError: any;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        await execFileAsync('git', ['fetch', '--depth', '1', 'origin', branchName], {
+          cwd: repoDir,
+          timeout: 25000,
+          env: gitEnv,
+        });
+        await execFileAsync('git', ['checkout', '-B', branchName, `origin/${branchName}`], {
+          cwd: repoDir,
+          timeout: 5000,
+          env: gitEnv,
+        });
+        await execFileAsync('git', ['reset', '--hard', `origin/${branchName}`], {
+          cwd: repoDir,
+          timeout: 5000,
+          env: gitEnv,
+        });
+      }
+
+      for (const f of files) {
+        const cleanPath = f.filePath.replace(/^\/+/, '');
+        const fullTargetFilePath = path.join(repoDir, cleanPath);
+        await fs.promises.mkdir(path.dirname(fullTargetFilePath), { recursive: true });
+        await fs.promises.writeFile(fullTargetFilePath, f.content, 'utf-8');
+        await execFileAsync('git', ['add', '--', cleanPath], { cwd: repoDir, timeout: 10000 });
+      }
+
+      const statusResult = await execFileAsync('git', ['status', '--porcelain'], { cwd: repoDir, timeout: 5000 });
+      if (statusResult.stdout.trim()) {
+        await execFileAsync('git', ['commit', '-m', commitMessage || `Update ${files.length} subscription files`], {
+          cwd: repoDir,
+          timeout: 15000,
+        });
+      }
+
+      if (!statusResult.stdout.trim()) {
+        const currentHead = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, timeout: 5000 });
+        return { success: true, sha: currentHead.stdout.trim() };
+      }
+
+      try {
+        await execFileAsync('git', ['push', 'origin', branchName], {
+          cwd: repoDir,
+          timeout: 30000,
+          env: gitEnv,
+        });
+        const revParse = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, timeout: 5000 });
+        return { success: true, sha: revParse.stdout.trim() };
+      } catch (err: any) {
+        lastPushError = err;
+        const pushOutput = `${err.stderr || ''}\n${err.message || ''}`;
+        const rejectedAsNonFastForward =
+          /fetch first|non-fast-forward|rejected/i.test(pushOutput);
+        if (!rejectedAsNonFastForward || attempt === 3) {
+          throw err;
+        }
+      }
     }
 
-    const statusResult = await execFileAsync('git', ['status', '--porcelain'], { cwd: repoDir, timeout: 5000 });
-    let commitSha = '';
-    if (statusResult.stdout.trim()) {
-      await execFileAsync('git', ['commit', '-m', commitMessage || `Update ${files.length} subscription files`], { cwd: repoDir, timeout: 15000 });
-    }
-    const revParse = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, timeout: 5000 });
-    commitSha = revParse.stdout.trim();
-
-    await execFileAsync('git', ['push', 'origin', branchName], { cwd: repoDir, timeout: 30000, env: gitEnv });
-
-    return { success: true, sha: commitSha };
+    throw lastPushError || new Error(`Не удалось отправить изменения в ${branchName}`);
   } catch (err: any) {
     console.error(`[Git CLI] Error batch committing to ${provider}:`, err.message);
     return { success: false, error: err.message };
