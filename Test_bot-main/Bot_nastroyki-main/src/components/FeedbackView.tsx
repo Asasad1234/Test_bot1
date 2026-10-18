@@ -30,6 +30,7 @@ import {
   resolveFeedbackUnblockAndUnbind, 
   resolveFeedbackUnblock, 
   resolveFeedbackUnbind, 
+  approveFeedbackReissue,
   terminateFeedbackUser,
   deleteFeedbackRequest,
   generateBotUnblockRequest
@@ -161,6 +162,27 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
       setTimeout(() => setActionSuccessMsg(null), 5000);
     } catch (err: any) {
       alert(err.message || 'Не удалось обработать заявку на отвязку');
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  const handleApproveReissue = async (reqItem: FeedbackRequest) => {
+    setProcessingId(reqItem.id);
+    try {
+      const res = await approveFeedbackReissue(reqItem.id);
+      setActionSuccessMsg(res.warning ? `${res.message} ${res.warning}` : res.message);
+      setRequests((prev) =>
+        prev.map((request) =>
+          request.id === reqItem.id
+            ? { ...request, status: 'resolved', resolvedAt: new Date().toISOString() }
+            : request
+        )
+      );
+      if (onRefreshStats) onRefreshStats();
+      setTimeout(() => setActionSuccessMsg(null), 7000);
+    } catch (err: any) {
+      alert(err.message || 'Не удалось перевыпустить подписку');
     } finally {
       setProcessingId(null);
     }
@@ -608,6 +630,7 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
           {filteredRequests.map((reqItem) => {
             const isPending = reqItem.status === 'pending';
             const isUnblock = reqItem.type === 'unblock_request';
+            const isReissue = reqItem.type === 'subscription_reissue';
             const isProcessing = processingId === reqItem.id;
             const createdDate = new Date(reqItem.createdAt).toLocaleString('ru-RU');
             const blockedDate = reqItem.blockedAt ? new Date(reqItem.blockedAt).toLocaleString('ru-RU') : createdDate;
@@ -642,7 +665,12 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
                       </span>
 
                       {/* Request Type Badge */}
-                      {isUnblock ? (
+                      {isReissue ? (
+                        <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-200 text-[11px] font-bold">
+                          <RefreshCw className="h-3 w-3 text-sky-600 shrink-0" />
+                          <span>Перевыпуск подписки</span>
+                        </span>
+                      ) : isUnblock ? (
                         <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200 text-[11px] font-bold">
                           <Ban className="h-3 w-3 text-rose-600 shrink-0" />
                           <span>Заявка на разбан</span>
@@ -663,7 +691,7 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
                       ) : (
                         <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-semibold">
                           <CheckCircle2 className="h-3 w-3 text-emerald-600 shrink-0" />
-                          <span>Разблокирован и решён</span>
+                          <span>{isReissue ? 'Перевыпуск одобрен' : 'Разблокирован и решён'}</span>
                         </span>
                       )}
 
@@ -729,14 +757,26 @@ export const FeedbackView: React.FC<FeedbackViewProps> = ({ onRefreshStats }) =>
                     {resolvedDate && (
                       <div className="text-[11px] text-emerald-700 flex items-center space-x-1 font-medium">
                         <UserCheck className="h-3.5 w-3.5 text-emerald-600" />
-                        <span>Решено администратором: {resolvedDate}</span>
+                        <span>{isReissue ? 'Одобрено администратором:' : 'Решено администратором:'} {resolvedDate}</span>
                       </div>
                     )}
                   </div>
 
                     {/* Action Buttons */}
                     <div className="flex flex-wrap lg:flex-col items-stretch lg:items-end justify-end gap-1.5 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-stone-100">
-                      {isPending && (
+                      {isPending && isReissue && (
+                        <button
+                          onClick={() => handleApproveReissue(reqItem)}
+                          disabled={isProcessing}
+                          className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
+                          title="Одобрить заявку и выдать пользователю новую подписку"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>{isProcessing ? 'Выдаём...' : 'Одобрить и выдать'}</span>
+                        </button>
+                      )}
+
+                      {isPending && !isReissue && (
                         <>
                           <button
                             onClick={() => handleUnblockOnly(reqItem)}

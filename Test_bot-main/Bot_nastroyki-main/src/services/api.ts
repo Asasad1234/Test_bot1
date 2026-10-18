@@ -616,6 +616,15 @@ export async function resolveFeedbackUnbind(requestId: string): Promise<{ succes
   return data;
 }
 
+export async function approveFeedbackReissue(requestId: string): Promise<{ success: boolean; message: string; warning?: string; user?: BotUser; request: FeedbackRequest }> {
+  const res = await fetch(`${API_BASE}/feedback/${requestId}/approve-reissue`, {
+    method: 'POST',
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'Ошибка перевыпуска подписки');
+  return data;
+}
+
 export async function deleteFeedbackRequest(requestId: string): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/feedback/${requestId}`, {
     method: 'DELETE',

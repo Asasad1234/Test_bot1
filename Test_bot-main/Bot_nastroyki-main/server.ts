@@ -422,7 +422,8 @@ interface FeedbackRequest {
   telegramId: number;
   username?: string;
   firstName?: string;
-  type: 'unbind_device' | 'general_feedback' | 'unblock_request';
+  type: 'unbind_device' | 'general_feedback' | 'unblock_request' | 'subscription_reissue';
+  reissueFormat?: 'happ' | 'incy';
   message: string;
   createdAt: string;
   status: 'pending' | 'resolved';
@@ -1072,6 +1073,22 @@ function normalizeStore(parsed: any): StoreData {
       boundDevice: u.boundDevice ?? null,
       trafficLimitBytes: (u.trafficLimitBytes === 100000000000 || u.trafficLimitBytes === 100 * 1024 * 1024 * 1024 || !u.trafficLimitBytes) ? 0 : u.trafficLimitBytes,
     }));
+  }
+  for (const request of parsed.feedbackRequests || []) {
+    if (
+      request.status === 'pending' &&
+      request.type === 'general_feedback' &&
+      request.message === 'Пользователь сообщил, что подписка не работает, и запросил перевыпуск.'
+    ) {
+      request.type = 'subscription_reissue';
+      const user = parsed.users?.find((item: any) =>
+        item.id === request.userId || item.telegramId === request.telegramId
+      );
+      if (user) {
+        request.reissueFormat = user.subscriptionType === 'happ' ? 'happ' : 'incy';
+        user.pendingSubscriptionReissue = false;
+      }
+    }
   }
   // Clean old puls-dostupa placeholder repository if present
   if (parsed.gitSources && parsed.gitSources.length > 0) {
@@ -7480,8 +7497,133 @@ app.post('/api/users/:id/bind-device', (req, res) => {
 });
 
 // Feedback and Unblock/Unbind Requests Management
+const processingReissueRequests = new Set<string>();
+
 app.get('/api/feedback', (req, res) => {
   res.json({ requests: store.feedbackRequests || [] });
+});
+
+app.post('/api/feedback/:id/approve-reissue', async (req, res) => {
+  const request = store.feedbackRequests?.find((item) => item.id === req.params.id);
+  if (!request || request.type !== 'subscription_reissue') {
+    return res.status(404).json({ success: false, message: 'Заявка на перевыпуск не найдена' });
+  }
+  if (request.status !== 'pending') {
+    return res.status(409).json({ success: false, message: 'Заявка уже обработана' });
+  }
+  if (processingReissueRequests.has(request.id)) {
+    return res.status(409).json({ success: false, message: 'Заявка уже обрабатывается' });
+  }
+
+  const user = store.users.find((item) => item.id === request.userId || item.telegramId === request.telegramId);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'Пользователь заявки не найден' });
+  }
+  if (
+    user.status !== 'active' ||
+    user.isMuted ||
+    user.isBlocked ||
+    user.isPermanentlyBanned ||
+    user.detachedFromCentral
+  ) {
+    return res.status(409).json({
+      success: false,
+      message: 'Нельзя выдать подписку: доступ пользователя приостановлен. Сначала восстановите доступ.',
+    });
+  }
+  processingReissueRequests.add(request.id);
+
+  const format = request.reissueFormat === 'happ' || request.reissueFormat === 'incy'
+    ? request.reissueFormat
+    : user.subscriptionType === 'happ'
+      ? 'happ'
+      : 'incy';
+  const previousSubscription = user.sourceSubscriptions?.find(
+    (item) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
+  ) || (user.gitFilePath && user.subscriptionSourceId
+    ? { sourceId: user.subscriptionSourceId, filePath: user.gitFilePath }
+    : undefined);
+
+  try {
+    const subscription = await ensureUserRepoFile(user, format, true);
+    let previousFileCleanupFailed = false;
+    if (previousSubscription && previousSubscription.filePath !== subscription.filePath) {
+      try {
+        const deleted = await deleteUserRepoFile(previousSubscription.sourceId, previousSubscription.filePath);
+        if (deleted) {
+          user.sourceSubscriptions = (user.sourceSubscriptions || []).filter(
+            (item) => item.sourceId !== previousSubscription.sourceId || item.filePath !== previousSubscription.filePath
+          );
+          store.repoFiles = (store.repoFiles || []).filter(
+            (item) => item.sourceId !== previousSubscription.sourceId || item.filePath !== previousSubscription.filePath
+          );
+        } else {
+          previousFileCleanupFailed = true;
+        }
+      } catch (err: any) {
+        previousFileCleanupFailed = true;
+        console.warn(`[Feedback reissue] Failed to delete old file for ${user.telegramId}:`, err.message);
+      }
+    }
+
+    user.pendingSubscriptionReissue = false;
+    user.receivedAt = user.receivedAt || new Date().toISOString();
+    user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
+    user.subscriptionType = format;
+    user.status = 'active';
+    user.hasActiveSubscription = true;
+    user.isBlocked = false;
+    user.isPermanentlyBanned = false;
+    user.sharingGraceDeadlineAt = null;
+    user.isTimerFrozen = true;
+    user.secondDeviceActive = false;
+    user.secondDeviceInfo = null;
+    user.sharingWarningCount = 0;
+    user.deviceViolationAttempts = 0;
+    user.boundDevice = null;
+    user.deviceLocked = false;
+    user.gitFilePath = subscription.filePath;
+    user.gitRawUrl = subscription.rawUrl;
+    user.finalSubscriptionUrl = subscription.finalUrl;
+    user.deletionDeadlineAt = null;
+    user.subscriptionStatusReason = undefined;
+
+    const displayKey = await resolveUserDisplayKey(user);
+    user.finalSubscriptionUrl = displayKey;
+    user.finalUrl = displayKey;
+    user.clckUrl = displayKey;
+    request.status = 'resolved';
+    request.resolvedAt = new Date().toISOString();
+    saveStore();
+
+    const activeBot = store.bots?.find((item) => item.id === user.botId) || getActiveBot();
+    let warning: string | undefined;
+    if (!activeBot?.token || !(await botManager.sendDirectTelegramMessage(
+      activeBot.token,
+      user.telegramId,
+      `✅ Администратор одобрил перевыпуск подписки.\n\n${displayKey}${previousFileCleanupFailed ? '\n\n⚠️ Не удалось удалить старый файл подписки.' : ''}`
+    ))) {
+      warning = 'Подписка выдана и заявка закрыта, но отправить сообщение пользователю в Telegram не удалось.';
+    }
+
+    return res.json({
+      success: true,
+      message: `Подписка для ${user.firstName || user.username || user.telegramId} перевыпущена.`,
+      warning,
+      request,
+      user,
+    });
+  } catch (err: any) {
+    user.pendingSubscriptionReissue = false;
+    saveStore();
+    console.error(`[Feedback subscription reissue failed] ${request.id}:`, err.message);
+    return res.status(502).json({
+      success: false,
+      message: `Не удалось перевыпустить подписку: ${err.message}`,
+    });
+  } finally {
+    processingReissueRequests.delete(request.id);
+  }
 });
 
 // Full Unblock & Unbind (Разблокировать и отвязать устройство)
@@ -11675,34 +11817,41 @@ app.post('/api/bot/simulate', async (req, res) => {
     }
   }
 
-  const inputCmd = (callbackData || text || '').toLowerCase().trim();
+  let inputCmd = (callbackData || text || '').toLowerCase().trim();
   const subUrl = `${host}/api/sub/${dbUser.subscriptionToken}`;
   const directSubUrl = dbUser.gitRawUrl || subUrl;
 
   if (inputCmd === 'cmd_report_broken_subscription') {
-    dbUser.pendingSubscriptionReissue = true;
+    dbUser.pendingSubscriptionReissue = false;
     store.feedbackRequests = store.feedbackRequests || [];
-    store.feedbackRequests.unshift({
-      id: `feedback_${Date.now()}_${dbUser.telegramId}`,
-      userId: dbUser.id,
-      telegramId: dbUser.telegramId,
-      username: dbUser.username,
-      firstName: dbUser.firstName,
-      type: 'general_feedback',
-      message: 'Пользователь сообщил, что подписка не работает, и запросил перевыпуск.',
-      createdAt: new Date().toISOString(),
-      status: 'pending',
-    });
+    const pendingRequest = store.feedbackRequests.find((request) =>
+      request.telegramId === dbUser.telegramId &&
+      request.type === 'subscription_reissue' &&
+      request.status === 'pending'
+    );
+    if (!pendingRequest) {
+      store.feedbackRequests.unshift({
+        id: `feedback_reissue_${Date.now()}_${dbUser.telegramId}`,
+        userId: dbUser.id,
+        telegramId: dbUser.telegramId,
+        username: dbUser.username,
+        firstName: dbUser.firstName,
+        type: 'subscription_reissue',
+        reissueFormat: dbUser.subscriptionType === 'happ' ? 'happ' : 'incy',
+        message: 'Пользователь запросил перевыпуск неработающей подписки. Требуется подтверждение администратора.',
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+      });
+    }
     saveStore();
-    const activeSource = store.gitSources?.find((source) => source.id === store.activeGitSourceId) || store.gitSources?.[0];
     return res.json({
       response: {
-        text: `🛠 Перевыпуск подписки\n\nНовая подписка будет создана в текущем источнике${activeSource?.name ? ` «${activeSource.name}»` : ''}. Выберите формат:`,
-        stepKey: 'choose_format',
+        text: '🛠 Запрос на перевыпуск отправлен администратору. Новая подписка будет выдана после подтверждения.',
+        stepKey: 'reissue_pending',
         buttons: [[
-          { text: '🚀 HAPP', callbackData: 'cmd_issue_happ', color: bot.buttonColor || 'indigo' },
-          { text: '⚡ INCY', callbackData: 'cmd_issue_incy', color: 'emerald' },
-        ], [{ text: 'Отмена', callbackData: 'cmd_menu' }]],
+          { text: '👤 Мой профиль', callbackData: 'cmd_profile' },
+          { text: '◀️ Главное меню', callbackData: 'cmd_menu' },
+        ]],
       },
     });
   }

@@ -296,7 +296,8 @@ export interface FeedbackRequest {
   telegramId: number;
   username?: string;
   firstName?: string;
-  type: 'unbind_device' | 'general_feedback' | 'unblock_request';
+  type: 'unbind_device' | 'general_feedback' | 'unblock_request' | 'subscription_reissue';
+  reissueFormat?: 'happ' | 'incy';
   message: string;
   createdAt: string;
   status: 'pending' | 'resolved';

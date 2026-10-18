@@ -1107,7 +1107,7 @@ export class TelegramBotManager {
     const queryId = cq.id;
     const chatId = cq.message?.chat?.id;
     const messageId = cq.message?.message_id;
-    const data = cq.data || '';
+    let data = cq.data || '';
     const user = this.findOrCreateUser(cq.from, bot);
     const store = this.options.getStore();
 
@@ -1140,31 +1140,38 @@ export class TelegramBotManager {
     }
 
     if (data === 'cmd_report_broken_subscription') {
-      user.pendingSubscriptionReissue = true;
+      user.pendingSubscriptionReissue = false;
       store.feedbackRequests = store.feedbackRequests || [];
-      store.feedbackRequests.unshift({
-        id: `feedback_${Date.now()}_${user.telegramId}`,
-        userId: user.id,
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        type: 'general_feedback',
-        message: 'Пользователь сообщил, что подписка не работает, и запросил перевыпуск.',
-        createdAt: new Date().toISOString(),
-        status: 'pending',
-      });
+      const pendingRequest = store.feedbackRequests.find((request: any) =>
+        request.telegramId === user.telegramId &&
+        request.type === 'subscription_reissue' &&
+        request.status === 'pending'
+      );
+      if (!pendingRequest) {
+        store.feedbackRequests.unshift({
+          id: `feedback_reissue_${Date.now()}_${user.telegramId}`,
+          userId: user.id,
+          telegramId: user.telegramId,
+          username: user.username,
+          firstName: user.firstName,
+          type: 'subscription_reissue',
+          reissueFormat: user.subscriptionType === 'happ' ? 'happ' : 'incy',
+          message: 'Пользователь запросил перевыпуск неработающей подписки. Требуется подтверждение администратора.',
+          createdAt: new Date().toISOString(),
+          status: 'pending',
+        });
+      }
       this.options.saveStore();
       await this.tgApi(bot.token, 'sendMessage', {
         chat_id: chatId,
-        text: '🛠 <b>Перевыпуск подписки</b>\n\nВыберите формат новой подписки. Она будет создана в текущем источнике, а предыдущий файл будет удалён, если источник доступен.',
+        text: '🛠 <b>Запрос на перевыпуск отправлен администратору.</b>\n\nНовая подписка будет выдана после подтверждения.',
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '🚀 HAPP (crypt4)', callback_data: 'cmd_issue_happ' },
-              { text: '⚡ INCY', callback_data: 'cmd_issue_incy' },
+              { text: '👤 Мой профиль', callback_data: 'cmd_profile' },
+              { text: '◀️ Главное меню', callback_data: 'cmd_menu' },
             ],
-            [{ text: 'Отмена', callback_data: 'cmd_menu' }],
           ],
         },
       });
