@@ -4,9 +4,8 @@ services:
     runtime: docker
     plan: starter
     region: frankfurt
-    rootDir: Test_bot-main/Bot_nastroyki-main
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    dockerfilePath: ./Test_bot-main/Bot_nastroyki-main/Dockerfile
+    dockerContext: ./Test_bot-main/Bot_nastroyki-main
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
