@@ -258,6 +258,7 @@ interface ExclusionSubscription {
   gitFilePath?: string;
   gitRawUrl?: string;
   happUrl?: string;
+  happTargetUrl?: string;
   incyUrl?: string;
   clckUrl?: string;
   clckTargetUrl?: string;
@@ -2085,7 +2086,7 @@ function repositoryPathFromInput(value: string, provider: GitProvider): string {
   }
 }
 
-// Build the configured HAPP deep-link format from the repository RAW URL.
+// Build the configured HAPP deep-link format from a subscription URL.
 const HAPP_CRYPTO_V4_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA3UZ0M3L4K+WjM3vkbQnz
 ozHg/cRbEXvQ6i4A8RVN4OM3rK9kU01FdjyoIgywve8OEKsFnVwERZAQZ1Trv60B
@@ -2175,8 +2176,17 @@ function getUserSubscriptionGatewayUrl(user: BotUser): string {
   return getRepositorySubscriptionGatewayUrl(token);
 }
 
+function getUserHappRedirectUrl(user: BotUser): string {
+  const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
+  return getHappRedirectUrl(token);
+}
+
 function getRepositorySubscriptionGatewayUrl(token: string): string {
   return `${getAppBaseUrl()}/api/repo-sub/${encodeURIComponent(token)}`;
+}
+
+function getHappRedirectUrl(token: string): string {
+  return `${getAppBaseUrl()}/api/happ-sub/${encodeURIComponent(token)}`;
 }
 
 async function readCurrentRepositoryFile(source: GitSourceItem, filePath: string): Promise<string> {
@@ -2262,11 +2272,12 @@ function isRepositoryRawUrl(source: GitSourceItem, rawUrl: string, filePath?: st
       const path = url.pathname.split('/').filter(Boolean);
       const repository = (source.repository || 'Vaynet/bot').replace(/^\/+|\/+$/g, '').split('/');
       const repositoryPath = path.slice(1, 1 + repository.length);
+      const commitSha = path[1 + repository.length] || '';
       return hostname === 'raw.sourcecraft.tech' &&
         path[0] === 'raw' &&
         repository.length > 0 &&
         repositoryPath.every((part, index) => part.toLowerCase() === repository[index].toLowerCase()) &&
-        /^[0-9a-f]{40}$/i.test(path[1 + repository.length] || '');
+        /^[0-9a-f]{40}$/i.test(commitSha);
     }
     const allowedHosts: Partial<Record<GitProvider, string[]>> = {
       sourcecraft: ['raw.sourcecraft.tech'],
@@ -2349,7 +2360,6 @@ async function getExistingCurrentSourceSubscription(
     repoFile.contentHash !== crypto.createHash('sha256').update(getUserRepoSubscriptionContent(user)).digest('hex') ||
     (format !== 'happ' && format !== 'incy') ||
     !isRepositoryRawUrl(source, rawUrl, filePath) ||
-    (format === 'happ' && !isHappUrlForVersion(finalUrl, store.happCryptVersion)) ||
     (format === 'incy' && !isClckShortUrl(finalUrl))
   ) return null;
 
@@ -2364,13 +2374,19 @@ async function getExistingCurrentSourceSubscription(
   user.gitRawUrl = rawUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
-  user.finalSubscriptionUrl = finalUrl;
-  user.finalUrl = finalUrl;
-  user.clckUrl = finalUrl;
-  user.clckTargetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : rawUrl;
+  const currentTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
+  const currentFinalUrl = format === 'happ' &&
+    (!isHappUrlForVersion(finalUrl, store.happCryptVersion) || user.clckTargetUrl !== currentTargetUrl)
+    ? buildHappCryptUrl(currentTargetUrl)
+    : finalUrl;
+  if (format === 'happ') applyUserHappCryptUrl(user, currentTargetUrl, currentFinalUrl);
+  user.finalSubscriptionUrl = currentFinalUrl;
+  user.finalUrl = currentFinalUrl;
+  user.clckUrl = currentFinalUrl;
+  user.clckTargetUrl = currentTargetUrl;
   saveStore();
 
-  return { url: finalUrl, format, sourceName: source.name };
+  return { url: currentFinalUrl, format, sourceName: source.name };
 }
 
 function applyUserIncyShortUrl(user: any, targetUrl: string, shortUrl: string): void {
@@ -2412,18 +2428,6 @@ function applyUserHappCryptUrl(
     (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
   );
   if (subscription) subscription.finalUrl = happUrl;
-  for (const item of user.sourceSubscriptions || []) {
-    const source = store.gitSources?.find((candidate) => candidate.id === item.sourceId);
-    if (
-      item.format === 'happ' &&
-      item !== subscription &&
-      item.rawUrl &&
-      source &&
-      isRepositoryRawUrl(source, item.rawUrl, item.filePath)
-    ) {
-      item.finalUrl = buildHappCryptUrl(item.rawUrl, version);
-    }
-  }
   const repoFile = store.repoFiles?.find(
     (item: RepoUserFile) =>
       item.sourceId === user.subscriptionSourceId &&
@@ -2446,7 +2450,8 @@ async function refreshUserSubscriptionLink(
   if (!source || !isRepositoryRawUrl(source, rawUrl, filePath)) {
     throw new Error(`Источник не вернул действительный RAW-адрес файла ${filePath}`);
   }
-  const targetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : rawUrl;
+  const isCurrentSource = user.subscriptionSourceId === sourceId || !user.subscriptionSourceId;
+  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
 
   if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
   let subscription = user.sourceSubscriptions.find(
@@ -2463,12 +2468,10 @@ async function refreshUserSubscriptionLink(
     };
     user.sourceSubscriptions.push(subscription);
   }
-  const previousRawUrl = subscription.rawUrl;
   const previousFinalUrl = subscription.finalUrl;
   subscription.rawUrl = rawUrl;
   subscription.format = format;
   subscription.updatedAt = new Date().toISOString();
-  const isCurrentSource = user.subscriptionSourceId === sourceId || !user.subscriptionSourceId;
   if (isCurrentSource) {
     user.subscriptionSourceId = sourceId;
     user.gitFilePath = filePath;
@@ -2477,7 +2480,9 @@ async function refreshUserSubscriptionLink(
 
   let finalUrl: string;
   if (format === 'happ') {
-    finalUrl = previousRawUrl === targetUrl && isHappUrlForVersion(previousFinalUrl, store.happCryptVersion)
+    finalUrl =
+      isHappUrlForVersion(previousFinalUrl, store.happCryptVersion) &&
+      user.clckTargetUrl === targetUrl
       ? previousFinalUrl
       : buildHappCryptUrl(targetUrl);
     if (!isHappUrlForVersion(finalUrl, store.happCryptVersion)) {
@@ -2523,7 +2528,7 @@ function migrateHappLinks(version: HappCryptVersion): number {
       user.subscriptionType !== 'happ' ||
       (!user.finalSubscriptionUrl && !user.gitRawUrl && !user.gitFilePath)
     ) continue;
-    const targetUrl = getUserSubscriptionTargetUrl(user);
+    const targetUrl = getUserHappRedirectUrl(user);
     if (!targetUrl) continue;
     applyUserHappCryptUrl(user, targetUrl, buildHappCryptUrl(targetUrl, version), version);
     user.subscriptionName = `HAPP (${version})`;
@@ -2531,7 +2536,8 @@ function migrateHappLinks(version: HappCryptVersion): number {
   }
   for (const exclusion of store.exclusions || []) {
     if (exclusion.gitRawUrl) {
-      exclusion.happUrl = buildHappCryptUrl(exclusion.gitRawUrl, version);
+      exclusion.happTargetUrl = getHappRedirectUrl(exclusion.token);
+      exclusion.happUrl = buildHappCryptUrl(exclusion.happTargetUrl, version);
       updatedCount++;
     }
   }
@@ -2540,7 +2546,17 @@ function migrateHappLinks(version: HappCryptVersion): number {
     const matchingUser = store.users?.find(
       (user) => user.subscriptionSourceId === repoFile.sourceId && user.gitFilePath === repoFile.filePath
     );
-    if (!matchingUser && repoFile.rawUrl) {
+    const matchingExclusion = store.exclusions?.find(
+      (exclusion) => exclusion.gitFilePath === repoFile.filePath &&
+        (!repoFile.userId || repoFile.userId === `excl_${exclusion.token}` || repoFile.userId === exclusion.userId)
+    );
+    if (matchingExclusion) {
+      matchingExclusion.happTargetUrl = getHappRedirectUrl(matchingExclusion.token);
+      repoFile.finalUrl = buildHappCryptUrl(matchingExclusion.happTargetUrl, version);
+      updatedCount++;
+    } else if (!matchingUser && repoFile.rawUrl) {
+      const source = store.gitSources?.find((item) => item.id === repoFile.sourceId) || getActiveGitSource();
+      repoFile.rawUrl = buildGitRawUrl(source, repoFile.filePath);
       repoFile.finalUrl = buildHappCryptUrl(repoFile.rawUrl, version);
       updatedCount++;
     }
@@ -2588,8 +2604,9 @@ async function resolveUserDisplayKey(user: any): Promise<string> {
   }
 
   if (isHapp) {
-    const happUrl = buildHappCryptUrl(targetBaseUrl);
-    applyUserHappCryptUrl(user, targetBaseUrl, happUrl);
+    const happTargetUrl = getUserHappRedirectUrl(user);
+    const happUrl = buildHappCryptUrl(happTargetUrl);
+    applyUserHappCryptUrl(user, happTargetUrl, happUrl);
     saveStore();
     return happUrl;
   } else {
@@ -3340,10 +3357,8 @@ async function ensureUserRepoFile(
   }
 
   let finalUrl = '';
-  const targetBaseUrl = gitRawUrl;
   if (format === 'happ') {
-    // HAPP wraps the assigned repository URL using the configured crypt format.
-    finalUrl = buildHappCryptUrl(targetBaseUrl);
+    finalUrl = buildHappCryptUrl(getUserHappRedirectUrl(user));
   } else {
     finalUrl = await shortenIncyUrl(getUserSubscriptionGatewayUrl(user), tokenSafe);
   }
@@ -3403,7 +3418,7 @@ async function ensureUserRepoFile(
   user.finalSubscriptionUrl = finalUrl;
   user.finalUrl = finalUrl;
   user.clckUrl = finalUrl;
-  user.clckTargetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user) : targetBaseUrl;
+  user.clckTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY (VLESS)';
   user.hasActiveSubscription = true;
@@ -5594,8 +5609,19 @@ app.get('/api/exclusions', async (req, res) => {
   const migrationErrors: string[] = [];
   // Synchronize dynamic status from store.users for channel exclusions
   for (const excl of store.exclusions || []) {
-    if (excl.gitRawUrl && !isHappUrlForVersion(excl.happUrl, store.happCryptVersion)) {
-      excl.happUrl = buildHappCryptUrl(excl.gitRawUrl, store.happCryptVersion);
+    const happTargetUrl = getHappRedirectUrl(excl.token);
+    if (
+      excl.gitRawUrl &&
+      (!isHappUrlForVersion(excl.happUrl, store.happCryptVersion) ||
+        excl.happTargetUrl !== happTargetUrl)
+    ) {
+      excl.happTargetUrl = happTargetUrl;
+      excl.happUrl = buildHappCryptUrl(happTargetUrl, store.happCryptVersion);
+      const repoFile = store.repoFiles?.find(
+        (item) => item.filePath === excl.gitFilePath && item.format === 'happ'
+      );
+      if (repoFile) repoFile.finalUrl = excl.happUrl;
+      migratedLinks = true;
     }
     const clckTargetUrl = getRepositorySubscriptionGatewayUrl(excl.token);
     if (
@@ -5741,10 +5767,11 @@ app.post('/api/exclusions', async (req, res) => {
   if (!gitRawUrl) gitRawUrl = buildGitRawUrl(activeGit, filePath);
 
   let happUrl = '';
+  const happTargetUrl = getHappRedirectUrl(token);
   try {
-    happUrl = buildHappCryptUrl(gitRawUrl);
+    happUrl = buildHappCryptUrl(happTargetUrl);
   } catch {
-    happUrl = buildHappCryptUrl(gitRawUrl);
+    happUrl = buildHappCryptUrl(happTargetUrl);
   }
 
   // INCY version: shortened clck.ru link (e.g. https://clck.ru/3W7gT2)
@@ -5775,6 +5802,7 @@ app.post('/api/exclusions', async (req, res) => {
     gitFilePath: filePath,
     gitRawUrl,
     happUrl,
+    happTargetUrl,
     incyUrl,
     clckUrl: clckUrl || undefined,
     clckTargetUrl,
@@ -5789,6 +5817,7 @@ app.post('/api/exclusions', async (req, res) => {
   store.repoFiles = store.repoFiles.filter((f) => f.filePath !== filePath);
   store.repoFiles.unshift({
     id: `sub_${token}`,
+    sourceId: activeGit.id,
     userId: `excl_${token}`,
     telegramId: 0,
     username: 'exclusion',
@@ -6148,10 +6177,11 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
 
   // HAPP crypt4 link
   let happUrl = '';
+  const happTargetUrl = getHappRedirectUrl(token);
   try {
-    happUrl = buildHappCryptUrl(gitRawUrl);
+    happUrl = buildHappCryptUrl(happTargetUrl);
   } catch {
-    happUrl = buildHappCryptUrl(gitRawUrl);
+    happUrl = buildHappCryptUrl(happTargetUrl);
   }
 
   // INCY (clck.ru encrypted link)
@@ -6182,6 +6212,15 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     mutedUntil: null,
     channelMembership: (channelMembership as any) || 'member',
     subscriptionToken: token,
+    subscriptionSourceId: activeGit.id,
+    sourceSubscriptions: [{
+      sourceId: activeGit.id,
+      filePath,
+      rawUrl: gitRawUrl,
+      format: format === 'happ' ? 'happ' : 'incy',
+      finalUrl: format === 'happ' ? happUrl : incyUrl,
+      updatedAt: new Date().toISOString(),
+    }],
     subscriptionExpiresAt: null,
     hasActiveSubscription: true,
     trafficUsedBytes: 0,
@@ -6200,7 +6239,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     gitRawUrl,
     finalSubscriptionUrl: format === 'happ' ? happUrl : incyUrl,
     clckUrl: clckUrl || undefined,
-    clckTargetUrl: format === 'incy' ? clckTargetUrl : undefined,
+    clckTargetUrl: format === 'happ' ? happTargetUrl : clckTargetUrl,
     detachedFromCentral: !isSubscribed,
   };
 
@@ -6224,6 +6263,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     gitFilePath: filePath,
     gitRawUrl,
     happUrl,
+    happTargetUrl,
     incyUrl,
     clckUrl: clckUrl || undefined,
     clckTargetUrl,
@@ -6253,6 +6293,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
   store.repoFiles = store.repoFiles.filter((f) => f.filePath !== filePath);
   store.repoFiles.unshift({
     id: `sub_${token}`,
+    sourceId: activeGit.id,
     userId: newUser.id,
     telegramId: rawTgId,
     username: cleanUsername || 'channel_exclusion',
@@ -6609,13 +6650,13 @@ app.get('/api/users', async (req, res) => {
     if (
       user.subscriptionType === 'happ' &&
       (!isHappUrlForVersion(user.finalSubscriptionUrl, store.happCryptVersion) ||
-        user.clckTargetUrl !== getUserSubscriptionTargetUrl(user))
+        user.clckTargetUrl !== getUserHappRedirectUrl(user))
     ) {
       const subscription = user.sourceSubscriptions?.find(
         (item) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
       );
-      const targetUrl = getUserSubscriptionTargetUrl(user);
-      if (subscription?.rawUrl || user.gitRawUrl) {
+      const targetUrl = getUserHappRedirectUrl(user);
+      if (subscription?.rawUrl || user.gitRawUrl || user.gitFilePath) {
         const link = buildHappCryptUrl(targetUrl, store.happCryptVersion);
         applyUserHappCryptUrl(user, targetUrl, link, store.happCryptVersion);
         user.subscriptionName = `HAPP (${store.happCryptVersion})`;
@@ -10801,6 +10842,7 @@ AllowedIPs = 0.0.0.0/0`;
   // Direct repository RAW URL for this user's subscription file
   const activeGit = getActiveGitSource();
   const matchedUser = store.users.find((u) => u.subscriptionToken === userToken);
+  const matchedExclusion = store.exclusions.find((item) => item.token === userToken);
   const candidateRawUrl = matchedUser
     ? getUserSubscriptionTargetUrl(matchedUser)
     : buildGitRawUrl(activeGit, `subs/${userToken}.txt`);
@@ -10813,14 +10855,22 @@ AllowedIPs = 0.0.0.0/0`;
     matchedUser?.gitFilePath ||
     `subs/${userToken}.txt`;
   const rawFileUrl = isRepositoryRawUrl(targetSource, candidateRawUrl, targetFilePath) ? candidateRawUrl : '';
-  const storedHappUrl = matchedUser?.clckTargetUrl === rawFileUrl &&
+  const happTargetUrl = matchedUser
+    ? getUserHappRedirectUrl(matchedUser)
+    : matchedExclusion
+      ? getHappRedirectUrl(matchedExclusion.token)
+      : rawFileUrl;
+  const storedHappUrl = matchedUser?.clckTargetUrl === happTargetUrl &&
     isHappUrlForVersion(matchedUser?.finalSubscriptionUrl, store.happCryptVersion)
     ? matchedUser.finalSubscriptionUrl
-    : '';
+    : matchedExclusion?.happTargetUrl === happTargetUrl &&
+      isHappUrlForVersion(matchedExclusion.happUrl, store.happCryptVersion)
+      ? matchedExclusion.happUrl
+      : '';
   const happSubscriptionUrl = storedHappUrl
     ? storedHappUrl
-    : rawFileUrl
-      ? convertToHappCryptUrl(rawFileUrl, userToken, matchedUser?.telegramId || 0)
+    : happTargetUrl
+      ? convertToHappCryptUrl(happTargetUrl, userToken, matchedUser?.telegramId || 0)
       : '';
 
   return [
@@ -11642,6 +11692,78 @@ app.get('/api/repo-sub/:token', async (req, res) => {
     console.error(`[Repository subscription proxy] Failed to read ${source.name}/${filePath}:`, err.message);
     return res.status(502).send(`Не удалось загрузить актуальный файл подписки из ${source.name}`);
   }
+});
+
+app.get('/api/happ-sub/:token', (req, res) => {
+  const { token } = req.params;
+  const user = store.users.find((item) => item.subscriptionToken === token);
+  const exclusion = store.exclusions.find((item) => item.token === token);
+  const linkedUser = user || (exclusion?.userId
+    ? store.users.find((item) => item.id === exclusion.userId || item.subscriptionToken === token)
+    : undefined);
+
+  if (!user && !exclusion) {
+    return res.status(404).send('Подписка не найдена');
+  }
+
+  const sourceSubscription = linkedUser?.sourceSubscriptions?.find(
+    (item) =>
+      item.filePath === linkedUser.gitFilePath &&
+      (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
+  ) || linkedUser?.sourceSubscriptions?.find(
+    (item) => !linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId
+  );
+  const filePath = linkedUser?.gitFilePath || sourceSubscription?.filePath || exclusion?.gitFilePath;
+  if (!filePath) {
+    return res.status(404).send('Файл подписки не привязан к репозиторию');
+  }
+
+  const matchingSubscription = linkedUser?.sourceSubscriptions?.find(
+    (item) =>
+      item.filePath === filePath &&
+      (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
+  );
+  const sourceId = linkedUser?.subscriptionSourceId || matchingSubscription?.sourceId ||
+    store.repoFiles?.find((item) => item.filePath === filePath)?.sourceId;
+  const source = sourceId
+    ? store.gitSources?.find((item) => item.id === sourceId)
+    : getActiveGitSource();
+  if (!source) {
+    return res.status(404).send('Git-источник файла подписки не найден');
+  }
+
+  const repoFile = store.repoFiles?.find(
+    (item) =>
+      item.sourceId === source.id &&
+      item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
+      (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
+      (!linkedUser || !item.userId || item.userId === linkedUser.id || item.userId === `excl_${token}`)
+  );
+  const cachedRawUrl = gitFileMetadataCache.get(filePath.replace(/^\/+/, ''))?.rawUrl;
+  const candidates = [
+    repoFile?.rawUrl,
+    matchingSubscription?.rawUrl,
+    linkedUser?.gitRawUrl,
+    exclusion?.gitRawUrl,
+    cachedRawUrl,
+    buildGitRawUrl(source, filePath),
+  ];
+  const rawUrl = candidates.find((candidate): candidate is string => {
+    if (!candidate || !isRepositoryRawUrl(source, candidate, filePath)) return false;
+    try {
+      return new URL(candidate).protocol === 'https:';
+    } catch {
+      return false;
+    }
+  });
+  if (!rawUrl) {
+    return res.status(502).send(`Не удалось определить актуальный RAW-адрес файла в ${source.name}`);
+  }
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  return res.redirect(302, rawUrl);
 });
 
 // 10. Public Subscription Serving Endpoint with Replacement Enforcement (/api/sub/:token and /sub/:token)
