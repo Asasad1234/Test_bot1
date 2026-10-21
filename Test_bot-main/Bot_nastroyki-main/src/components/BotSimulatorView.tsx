@@ -14,6 +14,8 @@ import {
   ExternalLink,
   Edit3,
   Save,
+  Plus,
+  Trash2,
   X,
   Clock
 } from 'lucide-react';
@@ -207,6 +209,14 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
   const [selfDeleteH, setSelfDeleteH] = useState(activeBot?.selfDeleteHours || 72);
   const [deletePrevMsg, setDeletePrevMsg] = useState(activeBot?.deletePreviousMessageOnStep || false);
   const [showQrCode, setShowQrCode] = useState<boolean>(activeBot?.showQrCode ?? true);
+  const [captchaType, setCaptchaType] = useState<ManagedBotItem['captchaType']>(activeBot?.captchaType || 'none');
+  const [buttonColor, setButtonColor] = useState(activeBot?.buttonColor || 'indigo');
+  const [enableFireworks, setEnableFireworks] = useState(activeBot?.enableFireworks ?? true);
+  const [mediaType, setMediaType] = useState<ManagedBotItem['mediaType']>(activeBot?.mediaType || 'none');
+  const [mediaUrl, setMediaUrl] = useState(activeBot?.mediaUrl || '');
+  const [privacyPolicyText, setPrivacyPolicyText] = useState(activeBot?.privacyPolicyText || '');
+  const [privacyPolicyUrl, setPrivacyPolicyUrl] = useState(activeBot?.privacyPolicyUrl || '');
+  const [channels, setChannels] = useState<ManagedBotItem['channels']>(activeBot?.channels || []);
 
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -233,6 +243,14 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
       setSelfDeleteH(activeBot.selfDeleteHours || 72);
       setDeletePrevMsg(activeBot.deletePreviousMessageOnStep || false);
       setShowQrCode(activeBot.showQrCode ?? true);
+      setCaptchaType(activeBot.captchaType || 'none');
+      setButtonColor(activeBot.buttonColor || 'indigo');
+      setEnableFireworks(activeBot.enableFireworks ?? true);
+      setMediaType(activeBot.mediaType || 'none');
+      setMediaUrl(activeBot.mediaUrl || '');
+      setPrivacyPolicyText(activeBot.privacyPolicyText || '');
+      setPrivacyPolicyUrl(activeBot.privacyPolicyUrl || '');
+      setChannels(activeBot.channels || []);
     }
   }, [activeBot]);
 
@@ -310,6 +328,8 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
           buttons: data.response.buttons,
           copyableText: data.response.copyableText,
           qrData: qrDataUrl,
+          mediaType: data.response.mediaType,
+          mediaUrl: data.response.mediaUrl,
           stepKey: data.response.stepKey,
         };
 
@@ -437,6 +457,14 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
         selfDeleteHours: selfDeleteH,
         deletePreviousMessageOnStep: deletePrevMsg,
         showQrCode: showQrCode,
+        captchaType,
+        buttonColor,
+        enableFireworks,
+        mediaType,
+        mediaUrl,
+        privacyPolicyText,
+        privacyPolicyUrl,
+        channels,
       });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -745,6 +773,18 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
                         <TelegramMessageContent text={m.text} />
                       )}
 
+                      {!isEditing && m.mediaType !== 'none' && m.mediaUrl && (
+                        <div className="mt-2">
+                          {m.mediaType === 'photo' ? (
+                            <img src={m.mediaUrl} alt="Bot media" className="max-h-48 rounded-lg object-cover" />
+                          ) : (
+                            <a href={m.mediaUrl} target="_blank" rel="noreferrer" className="text-sky-400 underline text-xs">
+                              {m.mediaType === 'video' ? '▶ Открыть видео' : '📎 Открыть вложение'}
+                            </a>
+                          )}
+                        </div>
+                      )}
+
                       {/* Copyable link card if present */}
                       {!isEditing && m.copyableText && (
                         <div className="mt-2.5 p-2 bg-stone-900/90 rounded-lg border border-stone-700 flex items-center justify-between space-x-2">
@@ -794,6 +834,10 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
                               if (btn.color === 'indigo') btnBg = 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500';
                               if (btn.color === 'emerald') btnBg = 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500';
                               if (btn.color === 'amber') btnBg = 'bg-amber-600 hover:bg-amber-500 text-white border-amber-500';
+                              if (btn.color === 'rose') btnBg = 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500';
+                              if (btn.color === 'sky') btnBg = 'bg-sky-600 hover:bg-sky-500 text-white border-sky-500';
+                              if (btn.color === 'violet') btnBg = 'bg-violet-600 hover:bg-violet-500 text-white border-violet-500';
+                              if (btn.color === 'stone') btnBg = 'bg-stone-600 hover:bg-stone-500 text-white border-stone-500';
 
                               return (
                                 <button
@@ -1134,6 +1178,132 @@ export const BotSimulatorView: React.FC<BotSimulatorViewProps> = ({
                         </span>
                       </div>
                     </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="font-semibold text-stone-700 block mb-1">Капча:</label>
+                      <select
+                        value={captchaType}
+                        onChange={(e) => setCaptchaType(e.target.value as ManagedBotItem['captchaType'])}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                      >
+                        <option value="none">Отключена</option>
+                        <option value="button">Кнопка подтверждения</option>
+                        <option value="math">Математическая</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="font-semibold text-stone-700 block mb-1">Цвет кнопок:</label>
+                      <select
+                        value={buttonColor}
+                        onChange={(e) => setButtonColor(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                      >
+                        {['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'stone'].map((color) => (
+                          <option key={color} value={color}>{color}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 p-3 rounded-xl border border-stone-200 bg-stone-50/70">
+                    <input type="checkbox" checked={enableFireworks} onChange={(e) => setEnableFireworks(e.target.checked)} />
+                    <span className="font-semibold text-stone-700">Показывать салют при выдаче подписки</span>
+                  </label>
+
+                  <div className="space-y-2">
+                    <label className="font-semibold text-stone-700 block">Медиа в сообщении бота:</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <select
+                        value={mediaType}
+                        onChange={(e) => setMediaType(e.target.value as ManagedBotItem['mediaType'])}
+                        className="px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                      >
+                        <option value="none">Нет</option>
+                        <option value="photo">Фото</option>
+                        <option value="video">Видео</option>
+                        <option value="document">Файл</option>
+                      </select>
+                      <input
+                        type="url"
+                        value={mediaUrl}
+                        onChange={(e) => setMediaUrl(e.target.value)}
+                        placeholder="HTTPS-ссылка на медиа"
+                        className="col-span-2 px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="font-semibold text-stone-700 block">Политика конфиденциальности:</label>
+                    <textarea
+                      rows={2}
+                      value={privacyPolicyText}
+                      onChange={(e) => setPrivacyPolicyText(e.target.value)}
+                      placeholder="Текст политики"
+                      className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                    />
+                    <input
+                      type="url"
+                      value={privacyPolicyUrl}
+                      onChange={(e) => setPrivacyPolicyUrl(e.target.value)}
+                      placeholder="HTTPS-ссылка на политику"
+                      className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 text-xs"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="font-semibold text-stone-700">Обязательные каналы Telegram:</label>
+                      <button
+                        type="button"
+                        onClick={() => setChannels((current) => [...current, { id: '', title: '', isRequired: true, isBotAdmin: false }])}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-stone-100 hover:bg-stone-200 text-xs"
+                      >
+                        <Plus className="h-3 w-3" /> Добавить
+                      </button>
+                    </div>
+                    {channels.map((channel, index) => (
+                      <div key={`${channel.id}-${index}`} className="grid grid-cols-12 gap-1.5 items-center">
+                        <input
+                          value={channel.id}
+                          onChange={(e) => setChannels((current) => current.map((item, i) => i === index ? { ...item, id: e.target.value } : item))}
+                          placeholder="@channel или -100..."
+                          className="col-span-4 px-2 py-1.5 rounded-lg border border-stone-200 text-xs"
+                        />
+                        <input
+                          value={channel.title}
+                          onChange={(e) => setChannels((current) => current.map((item, i) => i === index ? { ...item, title: e.target.value } : item))}
+                          placeholder="Название"
+                          className="col-span-3 px-2 py-1.5 rounded-lg border border-stone-200 text-xs"
+                        />
+                        <input
+                          value={channel.inviteLink || ''}
+                          onChange={(e) => setChannels((current) => current.map((item, i) => i === index ? { ...item, inviteLink: e.target.value } : item))}
+                          placeholder="Ссылка приглашения"
+                          className="col-span-3 px-2 py-1.5 rounded-lg border border-stone-200 text-xs"
+                        />
+                        <label className="col-span-1 flex items-center justify-center" title="Обязательный канал">
+                          <input
+                            type="checkbox"
+                            checked={channel.isRequired}
+                            onChange={(e) => setChannels((current) => current.map((item, i) => i === index ? { ...item, isRequired: e.target.checked } : item))}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setChannels((current) => current.filter((_, i) => i !== index))}
+                          className="col-span-1 text-rose-600 hover:text-rose-800 flex justify-center"
+                          title="Удалить канал"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-stone-500">
+                      Эти же настройки применятся к активному Telegram-боту после сохранения.
+                    </p>
                   </div>
                 </>
               )}

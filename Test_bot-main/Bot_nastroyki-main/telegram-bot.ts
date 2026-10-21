@@ -1425,6 +1425,56 @@ export class TelegramBotManager {
           });
           return;
         }
+
+        try {
+          const format = user.subscriptionType === 'incy' ? 'incy' : 'happ';
+          const subscription = await this.options.ensureUserRepoFile(user, format);
+          user.gitFilePath = subscription.filePath;
+          user.gitRawUrl = subscription.rawUrl;
+          user.finalSubscriptionUrl = subscription.finalUrl;
+          user.finalUrl = subscription.finalUrl;
+          user.clckUrl = subscription.finalUrl;
+          user.subscriptionType = format;
+          user.subscriptionName = format === 'happ'
+            ? `HAPP (${this.options.getStore().happCryptVersion || 'crypt4'})`
+            : 'INCY';
+          user.subscriptionSourceId = this.options.getStore().activeGitSourceId;
+          user.hasActiveSubscription = true;
+          user.status = 'active';
+          this.options.saveStore();
+
+          const activeSource = this.options.getStore().gitSources?.find(
+            (source: any) => source.id === user.subscriptionSourceId
+          );
+          const formatName = format === 'happ'
+            ? `HAPP (${this.options.getStore().happCryptVersion || 'crypt4'})`
+            : 'INCY';
+          await this.tgApi(bot.token, 'sendMessage', {
+            chat_id: chatId,
+            text:
+              `✅ <b>Подписка из текущего источника</b> «${escapeHtml(activeSource?.name || 'центральный источник')}» подготовлена.\n\n` +
+              `Формат: <b>${formatName}</b>\n\n<code>${escapeHtml(subscription.finalUrl)}</code>`,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: '👤 Мой профиль', callback_data: 'cmd_profile' },
+                  { text: '📋 Инструкция', callback_data: 'cmd_instructions' },
+                ],
+                [{ text: '🛠 Подписка не работает — перевыпустить', callback_data: 'cmd_report_broken_subscription' }],
+                [{ text: '◀️ Главное меню', callback_data: 'cmd_menu' }],
+              ],
+            },
+          });
+        } catch (err: any) {
+          console.error(`[Current source subscription creation failed for ${user.telegramId}]:`, err.message);
+          await this.tgApi(bot.token, 'sendMessage', {
+            chat_id: chatId,
+            text: `⚠️ Не удалось подготовить подписку из текущего источника. Ссылка не изменена. ${escapeHtml(err.message || '')}`,
+            parse_mode: 'HTML',
+          });
+        }
+        return;
       }
 
       await this.sendFormatSelection(bot, chatId);
@@ -1856,6 +1906,30 @@ export class TelegramBotManager {
     });
   }
 
+  private async sendMainMenuMessage(bot: any, chatId: number | string, message: Record<string, any>) {
+    const mediaMethod = bot.mediaType === 'photo'
+      ? 'sendPhoto'
+      : bot.mediaType === 'video'
+        ? 'sendVideo'
+        : bot.mediaType === 'document'
+          ? 'sendDocument'
+          : '';
+    if (mediaMethod && bot.mediaUrl?.trim()) {
+      try {
+        const result = await this.tgApi(bot.token, mediaMethod, {
+          chat_id: chatId,
+          [bot.mediaType]: bot.mediaUrl.trim(),
+        });
+        if (!result?.ok) {
+          console.warn(`[Telegram Bot] Welcome media could not be sent for ${bot.id}:`, result?.description || 'Telegram API rejected media');
+        }
+      } catch (err: any) {
+        console.warn(`[Telegram Bot] Welcome media request failed for ${bot.id}:`, err.message);
+      }
+    }
+    return this.tgApi(bot.token, 'sendMessage', message);
+  }
+
   private async sendMainMenu(bot: any, chatId: number | string, user: any) {
     const isSubActive = Boolean(user.hasActiveSubscription && user.finalSubscriptionUrl);
     const isHapp = user.subscriptionType === 'happ';
@@ -1902,8 +1976,7 @@ export class TelegramBotManager {
       blockedButtons.push([{ text: '📝 Подать заявку на разблокировку', callback_data: 'cmd_request_unblock' }]);
       blockedButtons.push([{ text: '💬 Связаться с администратором', url: bot.adminContactUrl || 'https://t.me/puls_admin' }]);
 
-      await this.tgApi(bot.token, 'sendMessage', {
-        chat_id: chatId,
+      await this.sendMainMenuMessage(bot, chatId, {
         text: `${blockedHtml}\n\n` +
           `⛔ <b>Причина:</b> ${escapeHtml(user.subscriptionStatusReason || user.blockedReason || 'Блокировка')}`,
         parse_mode: 'HTML',
@@ -1922,8 +1995,7 @@ export class TelegramBotManager {
         `📱 Доступ: 1 персональное устройство\n\n` +
         `Управляйте вашей подпиской через меню ниже:${sourceChangeNotice}`;
 
-      await this.tgApi(bot.token, 'sendMessage', {
-        chat_id: chatId,
+      await this.sendMainMenuMessage(bot, chatId, {
         text,
         parse_mode: 'HTML',
         reply_markup: {
@@ -1952,8 +2024,7 @@ export class TelegramBotManager {
       `${welcomeHtml}\n\n` +
       `⚡ Получите персональный ключ высокоскоростного подключения прямо сейчас:`;
 
-    await this.tgApi(bot.token, 'sendMessage', {
-      chat_id: chatId,
+    await this.sendMainMenuMessage(bot, chatId, {
       text,
       parse_mode: 'HTML',
       reply_markup: {

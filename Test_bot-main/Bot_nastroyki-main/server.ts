@@ -369,6 +369,7 @@ interface BotUser {
     rawUrl: string;
     format: 'happ' | 'incy';
     finalUrl: string;
+    clckTargetUrl?: string;
     updatedAt: string;
   }>;
   pendingSubscriptionReissue?: boolean;
@@ -2128,21 +2129,6 @@ function isClckShortUrl(url: string | undefined): url is string {
   return Boolean(url && /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(url));
 }
 
-async function clckRedirectsTo(shortUrl: string, targetUrl: string): Promise<boolean> {
-  const response = await fetch(shortUrl, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(10000),
-  });
-  const location = response.headers.get('location');
-  await response.body?.cancel();
-  if (response.status < 300 || response.status >= 400 || !location) return false;
-  const redirectUrl = new URL(location, shortUrl);
-  const resolvedTarget = redirectUrl.hostname === 'sba.yandex.ru' && redirectUrl.pathname === '/redirect'
-    ? redirectUrl.searchParams.get('url')
-    : redirectUrl.href;
-  return Boolean(resolvedTarget && new URL(resolvedTarget).href === new URL(targetUrl).href);
-}
-
 function getUserSubscriptionTargetUrl(user: any): string {
   const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
   const subscription = user.sourceSubscriptions?.find(
@@ -2329,6 +2315,7 @@ async function getExistingCurrentSourceSubscription(
           rawUrl: user.gitRawUrl || '',
           format: user.subscriptionType === 'happ' ? 'happ' as const : 'incy' as const,
           finalUrl: user.finalSubscriptionUrl || user.finalUrl || '',
+          clckTargetUrl: user.clckTargetUrl,
         }
       : linkedRepoFile
         ? {
@@ -2337,6 +2324,7 @@ async function getExistingCurrentSourceSubscription(
             rawUrl: linkedRepoFile.rawUrl,
             format: linkedRepoFile.format,
             finalUrl: linkedRepoFile.finalUrl,
+            clckTargetUrl: undefined,
           }
         : undefined);
   if (!subscription?.filePath) return null;
@@ -2367,26 +2355,34 @@ async function getExistingCurrentSourceSubscription(
   if (!response.ok) return null;
   const remoteContent = await response.text();
   if (crypto.createHash('sha256').update(remoteContent).digest('hex') !== repoFile.contentHash) return null;
-  if (format === 'incy' && !(await clckRedirectsTo(finalUrl, getUserSubscriptionGatewayUrl(user)))) return null;
+  const targetUrl = format === 'incy' ? rawUrl : getUserHappRedirectUrl(user);
+  let currentFinalUrl = finalUrl;
+  if (format === 'incy' && (
+    subscription.clckTargetUrl !== rawUrl ||
+    !isClckShortUrl(finalUrl)
+  )) {
+    currentFinalUrl = await shortenIncyUrl(rawUrl, user.subscriptionToken);
+  }
 
   user.subscriptionSourceId = source.id;
   user.gitFilePath = filePath;
   user.gitRawUrl = rawUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
-  const currentTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
-  const currentFinalUrl = format === 'happ' &&
-    (!isHappUrlForVersion(finalUrl, store.happCryptVersion) || user.clckTargetUrl !== currentTargetUrl)
-    ? buildHappCryptUrl(currentTargetUrl)
-    : finalUrl;
-  if (format === 'happ') applyUserHappCryptUrl(user, currentTargetUrl, currentFinalUrl);
-  user.finalSubscriptionUrl = currentFinalUrl;
-  user.finalUrl = currentFinalUrl;
-  user.clckUrl = currentFinalUrl;
-  user.clckTargetUrl = currentTargetUrl;
+  const resolvedFinalUrl = format === 'happ' &&
+    (!isHappUrlForVersion(finalUrl, store.happCryptVersion) || user.clckTargetUrl !== targetUrl)
+    ? buildHappCryptUrl(targetUrl)
+    : currentFinalUrl;
+  if (format === 'happ') applyUserHappCryptUrl(user, targetUrl, resolvedFinalUrl);
+  else applyUserIncyShortUrl(user, targetUrl, resolvedFinalUrl);
+  if (subscription) {
+    subscription.finalUrl = resolvedFinalUrl;
+    subscription.clckTargetUrl = targetUrl;
+  }
+  if (repoFile) repoFile.finalUrl = resolvedFinalUrl;
   saveStore();
 
-  return { url: currentFinalUrl, format, sourceName: source.name };
+  return { url: resolvedFinalUrl, format, sourceName: source.name };
 }
 
 function applyUserIncyShortUrl(user: any, targetUrl: string, shortUrl: string): void {
@@ -2399,7 +2395,10 @@ function applyUserIncyShortUrl(user: any, targetUrl: string, shortUrl: string): 
   const subscription = user.sourceSubscriptions?.find(
     (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
   );
-  if (subscription) subscription.finalUrl = shortUrl;
+  if (subscription) {
+    subscription.finalUrl = shortUrl;
+    subscription.clckTargetUrl = targetUrl;
+  }
   const repoFile = store.repoFiles?.find(
     (item: RepoUserFile) =>
       item.sourceId === user.subscriptionSourceId &&
@@ -2451,7 +2450,7 @@ async function refreshUserSubscriptionLink(
     throw new Error(`Источник не вернул действительный RAW-адрес файла ${filePath}`);
   }
   const isCurrentSource = user.subscriptionSourceId === sourceId || !user.subscriptionSourceId;
-  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
+  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : rawUrl;
 
   if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
   let subscription = user.sourceSubscriptions.find(
@@ -2494,7 +2493,12 @@ async function refreshUserSubscriptionLink(
       subscription.finalUrl = finalUrl;
     }
   } else {
-    if (isCurrentSource && user.clckTargetUrl === targetUrl && isClckShortUrl(user.clckUrl)) {
+    if (
+      subscription.clckTargetUrl === targetUrl &&
+      isClckShortUrl(subscription.finalUrl)
+    ) {
+      finalUrl = subscription.finalUrl;
+    } else if (isCurrentSource && user.clckTargetUrl === targetUrl && isClckShortUrl(user.clckUrl)) {
       finalUrl = user.clckUrl;
     } else {
       finalUrl = await shortenIncyUrl(targetUrl, token);
@@ -2510,6 +2514,7 @@ async function refreshUserSubscriptionLink(
       user.clckTargetUrl = targetUrl;
     } else {
       subscription.finalUrl = finalUrl;
+      subscription.clckTargetUrl = targetUrl;
     }
   }
   subscription.finalUrl = finalUrl;
@@ -2610,11 +2615,16 @@ async function resolveUserDisplayKey(user: any): Promise<string> {
     saveStore();
     return happUrl;
   } else {
-    const gatewayUrl = getUserSubscriptionGatewayUrl(user);
-    const incyUrl = user.clckTargetUrl === gatewayUrl && isClckShortUrl(user.clckUrl)
+    const targetUrl = getUserSubscriptionTargetUrl(user);
+    const subscription = user.sourceSubscriptions?.find(
+      (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
+    );
+    const incyUrl = subscription?.clckTargetUrl === targetUrl && isClckShortUrl(subscription.finalUrl)
+      ? subscription.finalUrl
+      : user.clckTargetUrl === targetUrl && isClckShortUrl(user.clckUrl)
       ? user.clckUrl
-      : await shortenIncyUrl(gatewayUrl, token);
-    applyUserIncyShortUrl(user, gatewayUrl, incyUrl);
+      : await shortenIncyUrl(targetUrl, token);
+    applyUserIncyShortUrl(user, targetUrl, incyUrl);
     saveStore();
     return incyUrl;
   }
@@ -3315,7 +3325,17 @@ async function ensureUserRepoFile(
   const sourceSubscription = user.sourceSubscriptions.find(
     (subscription) => subscription.sourceId === activeGit.id && subscription.filePath === user.gitFilePath
   ) || user.sourceSubscriptions.find((subscription) => subscription.sourceId === activeGit.id) ||
-    (linkedRepoFile ? { sourceId: activeGit.id, filePath: linkedRepoFile.filePath } : undefined);
+    (linkedRepoFile
+      ? {
+          sourceId: activeGit.id,
+          filePath: linkedRepoFile.filePath,
+          rawUrl: linkedRepoFile.rawUrl,
+          format: linkedRepoFile.format === 'incy' ? 'incy' as const : 'happ' as const,
+          finalUrl: linkedRepoFile.finalUrl,
+          clckTargetUrl: undefined,
+          updatedAt: linkedRepoFile.updatedAt,
+        }
+      : undefined);
   const safeSourceId = activeGit.id.replace(/[^a-zA-Z0-9_-]/g, '_');
   const filePath = forceNewFile
     ? `subs/${tokenSafe}_${safeSourceId}_${Date.now()}.txt`
@@ -3323,7 +3343,10 @@ async function ensureUserRepoFile(
       (user.subscriptionSourceId === activeGit.id ? user.gitFilePath : undefined) ||
       (user.sourceSubscriptions.length > 0 ? `subs/${tokenSafe}_${safeSourceId}.txt` : `subs/${tokenSafe}.txt`);
   const fileRecordId = `sub_${tokenSafe}_${safeSourceId}_${crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 8)}`;
-  let gitRawUrl = buildGitRawUrl(activeGit, filePath);
+  const existingRepoFile = store.repoFiles?.find(
+    (file) => file.sourceId === activeGit.id && file.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '')
+  );
+  let gitRawUrl = sourceSubscription?.rawUrl || existingRepoFile?.rawUrl || buildGitRawUrl(activeGit, filePath);
 
   // Determine actual node content to write
   const nodeContent = getUserRepoSubscriptionContent(user);
@@ -3333,24 +3356,29 @@ async function ensureUserRepoFile(
   if (!activeGit.token?.trim()) {
     throw new Error(`Не настроен токен для активного Git-источника «${activeGit.name}»`);
   }
-  const { owner, repo } = getRepoParts(activeGit);
-  const branch = activeGit.branch || getDefaultGitBranch(activeGit.provider);
-  const gitResult = await createOrUpdateGitVerseFile({
-    token: activeGit.token,
-    owner,
-    repo,
-    branch,
-    filePath,
-    content: nodeContent,
-    commitMessage: `Subscription ${filePath} for user ${user.username ? '@' + user.username : user.telegramId}`,
-    provider: activeGit.provider,
-    apiUrl: activeGit.apiUrl,
-  });
-  if (!gitResult.success) {
-    throw new Error(`Не удалось записать подписку в ${activeGit.name}: ${gitResult.error || 'ошибка Git'}`);
-  }
-  if (gitResult.rawUrl) {
-    gitRawUrl = gitResult.rawUrl;
+  const fileIsCurrent = !forceNewFile &&
+    existingRepoFile?.contentHash === targetContentHash &&
+    isRepositoryRawUrl(activeGit, gitRawUrl, filePath);
+  if (!fileIsCurrent) {
+    const { owner, repo } = getRepoParts(activeGit);
+    const branch = activeGit.branch || getDefaultGitBranch(activeGit.provider);
+    const gitResult = await createOrUpdateGitVerseFile({
+      token: activeGit.token,
+      owner,
+      repo,
+      branch,
+      filePath,
+      content: nodeContent,
+      commitMessage: `Subscription ${filePath} for user ${user.username ? '@' + user.username : user.telegramId}`,
+      provider: activeGit.provider,
+      apiUrl: activeGit.apiUrl,
+    });
+    if (!gitResult.success) {
+      throw new Error(`Не удалось записать подписку в ${activeGit.name}: ${gitResult.error || 'ошибка Git'}`);
+    }
+    if (gitResult.rawUrl) {
+      gitRawUrl = gitResult.rawUrl;
+    }
   }
   if (!isRepositoryRawUrl(activeGit, gitRawUrl, filePath)) {
     throw new Error(`Git-источник «${activeGit.name}» не вернул действительную RAW-ссылку на файл ${filePath}`);
@@ -3360,7 +3388,12 @@ async function ensureUserRepoFile(
   if (format === 'happ') {
     finalUrl = buildHappCryptUrl(getUserHappRedirectUrl(user));
   } else {
-    finalUrl = await shortenIncyUrl(getUserSubscriptionGatewayUrl(user), tokenSafe);
+    const existingTargetUrl = sourceSubscription?.clckTargetUrl ||
+      (user.subscriptionSourceId === activeGit.id && user.gitFilePath === filePath ? user.clckTargetUrl : undefined);
+    const existingFinalUrl = sourceSubscription?.finalUrl || existingRepoFile?.finalUrl;
+    finalUrl = existingTargetUrl === gitRawUrl && isClckShortUrl(existingFinalUrl)
+      ? existingFinalUrl
+      : await shortenIncyUrl(gitRawUrl, tokenSafe);
   }
   if (format === 'happ' && !isHappUrlForVersion(finalUrl, store.happCryptVersion)) {
     throw new Error(`Не удалось сформировать HAPP-ссылку формата ${store.happCryptVersion}.`);
@@ -3418,7 +3451,7 @@ async function ensureUserRepoFile(
   user.finalSubscriptionUrl = finalUrl;
   user.finalUrl = finalUrl;
   user.clckUrl = finalUrl;
-  user.clckTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user);
+  user.clckTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : gitRawUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY (VLESS)';
   user.hasActiveSubscription = true;
@@ -3474,6 +3507,7 @@ async function ensureUserRepoFile(
     rawUrl: gitRawUrl,
     format,
     finalUrl,
+    clckTargetUrl: format === 'incy' ? gitRawUrl : undefined,
     updatedAt: new Date().toISOString(),
   });
 
@@ -5623,7 +5657,7 @@ app.get('/api/exclusions', async (req, res) => {
       if (repoFile) repoFile.finalUrl = excl.happUrl;
       migratedLinks = true;
     }
-    const clckTargetUrl = getRepositorySubscriptionGatewayUrl(excl.token);
+    const clckTargetUrl = excl.gitRawUrl || '';
     if (
       excl.gitFilePath &&
       excl.gitRawUrl &&
@@ -5636,7 +5670,8 @@ app.get('/api/exclusions', async (req, res) => {
         const linkedUser = store.users?.find((user) =>
           user.id === excl.userId || user.subscriptionToken === excl.token
         );
-        if (linkedUser?.subscriptionType === 'incy') {
+        const exclusionSourceId = store.repoFiles?.find((file) => file.filePath === excl.gitFilePath)?.sourceId;
+        if (linkedUser?.subscriptionType === 'incy' && linkedUser.subscriptionSourceId === exclusionSourceId) {
           applyUserIncyShortUrl(linkedUser, clckTargetUrl, excl.clckUrl);
         }
         migratedLinks = true;
@@ -5776,7 +5811,7 @@ app.post('/api/exclusions', async (req, res) => {
 
   // INCY version: shortened clck.ru link (e.g. https://clck.ru/3W7gT2)
   let clckUrl = '';
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token);
+  const clckTargetUrl = gitRawUrl;
   try {
     clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
@@ -6038,8 +6073,7 @@ app.post('/api/exclusions/:id/sync', async (req, res) => {
     }
   }
 
-  // Keep the short link pointed at a stable endpoint that reads this repo file's current branch version.
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(target.token);
+  const clckTargetUrl = target.gitRawUrl || '';
   if (target.gitRawUrl && (!isClckShortUrl(target.clckUrl) || target.clckTargetUrl !== clckTargetUrl)) {
     try {
       const short = await shortenIncyUrl(clckTargetUrl, target.token);
@@ -6076,7 +6110,10 @@ app.post('/api/exclusions/:id/shorten-clck', async (req, res) => {
   const target = store.exclusions.find((e) => e.id === id);
   if (!target) return res.status(404).json({ success: false, message: 'Исключение не найдено' });
 
-  const rawUrl = getRepositorySubscriptionGatewayUrl(target.token);
+  const rawUrl = target.gitRawUrl;
+  if (!rawUrl) {
+    return res.status(400).json({ success: false, message: 'У исключения нет RAW-ссылки на файл в репозитории.' });
+  }
   let shortUrl: string;
   try {
     shortUrl = await shortenIncyUrl(rawUrl, target.token);
@@ -6186,7 +6223,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
 
   // INCY (clck.ru encrypted link)
   let clckUrl = '';
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token);
+  const clckTargetUrl = gitRawUrl;
   try {
     clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
@@ -6219,6 +6256,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
       rawUrl: gitRawUrl,
       format: format === 'happ' ? 'happ' : 'incy',
       finalUrl: format === 'happ' ? happUrl : incyUrl,
+      clckTargetUrl: format === 'incy' ? gitRawUrl : undefined,
       updatedAt: new Date().toISOString(),
     }],
     subscriptionExpiresAt: null,
@@ -6666,7 +6704,7 @@ app.get('/api/users', async (req, res) => {
       user.subscriptionType === 'incy' &&
       (user.gitFilePath || user.gitRawUrl) &&
       (!isClckShortUrl(user.finalSubscriptionUrl) ||
-        user.clckTargetUrl !== getUserSubscriptionGatewayUrl(user))
+        user.clckTargetUrl !== getUserSubscriptionTargetUrl(user))
     ) {
       staleIncyUsers.push(user);
     }
@@ -7127,7 +7165,7 @@ app.post('/api/users/:id/shorten-clck', async (req, res) => {
   const user = store.users.find((u) => u.id === id || u.telegramId === Number(id));
   if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
 
-  const rawUrl = getUserSubscriptionGatewayUrl(user);
+  const rawUrl = getUserSubscriptionTargetUrl(user);
   let shortUrl: string;
   try {
     shortUrl = await shortenIncyUrl(rawUrl, user.subscriptionToken);
@@ -11694,7 +11732,7 @@ app.get('/api/repo-sub/:token', async (req, res) => {
   }
 });
 
-app.get('/api/happ-sub/:token', (req, res) => {
+app.get('/api/happ-sub/:token', async (req, res) => {
   const { token } = req.params;
   const user = store.users.find((item) => item.subscriptionToken === token);
   const exclusion = store.exclusions.find((item) => item.token === token);
@@ -11760,10 +11798,21 @@ app.get('/api/happ-sub/:token', (req, res) => {
     return res.status(502).send(`Не удалось определить актуальный RAW-адрес файла в ${source.name}`);
   }
 
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  return res.redirect(302, rawUrl);
+  try {
+    const response = await fetch(rawUrl, { signal: AbortSignal.timeout(20000) });
+    if (!response.ok) {
+      return res.status(502).send(`Невозможно получить актуальный файл подписки из ${source.name}`);
+    }
+    const content = await response.text();
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.send(content);
+  } catch (err: any) {
+    console.error(`[HAPP subscription proxy] Failed to fetch ${rawUrl}:`, err.message);
+    return res.status(502).send(`Не удалось загрузить актуальную подписку из ${source.name}`);
+  }
 });
 
 // 10. Public Subscription Serving Endpoint with Replacement Enforcement (/api/sub/:token and /sub/:token)
@@ -12039,6 +12088,8 @@ app.get('/api/sub/enc/:cipherToken', async (req, res) => {
 });
 
 // 11. Interactive Bot Funnel & Simulation Engine
+const simulatedBotUsers = new Map<string, BotUser>();
+
 app.post('/api/bot/simulate', async (req, res) => {
   const { text, callbackData, user, clientTime: reqClientTime, clientTimeZone: reqClientTimeZone } = req.body;
   const bot = getActiveBot();
@@ -12061,7 +12112,8 @@ app.post('/api/bot/simulate', async (req, res) => {
     isBlocked: false,
   };
 
-  let dbUser = store.users.find((u) => u.telegramId === currentUser.id);
+  const simulatedUserKey = String(currentUser.id);
+  let dbUser = simulatedBotUsers.get(simulatedUserKey);
   if (!dbUser) {
     const token = `sub_${currentUser.username || currentUser.id}_${Math.random().toString(36).substring(2, 8)}`;
     dbUser = {
@@ -12084,15 +12136,12 @@ app.post('/api/bot/simulate', async (req, res) => {
       lastActiveAt: new Date().toISOString(),
       personalNodes: [],
     };
-    store.users.unshift(dbUser);
-    saveStore();
+    simulatedBotUsers.set(simulatedUserKey, dbUser);
   } else {
     // Keep dbUser status in sync with simulation toggles
-    let changed = false;
     if (currentUser.isBlocked !== undefined && dbUser.isBlocked !== Boolean(currentUser.isBlocked)) {
       dbUser.isBlocked = Boolean(currentUser.isBlocked);
       dbUser.status = currentUser.isBlocked ? 'blocked' : (dbUser.channelMembership === 'left' ? 'channel_inactive' : 'active');
-      changed = true;
     }
     if (currentUser.isChannelMember !== undefined) {
       const newMembership = currentUser.isChannelMember ? 'member' : 'left';
@@ -12103,13 +12152,43 @@ app.post('/api/bot/simulate', async (req, res) => {
         } else if (!dbUser.isBlocked) {
           dbUser.status = 'active';
         }
-        changed = true;
       }
     }
-    if (changed) {
-      saveStore();
-    }
   }
+
+  const createSimulationSubscription = (format: 'happ' | 'incy') => {
+    const sourceId = getActiveGitSource().id;
+    const filePath = `simulation/${dbUser.subscriptionToken}.${format === 'happ' ? 'happ' : 'txt'}`;
+    const rawUrl = `https://example.invalid/${encodeURIComponent(sourceId)}/${encodeURIComponent(filePath)}`;
+    const finalUrl = format === 'happ'
+      ? `happ://crypt4/simulation/${encodeURIComponent(dbUser.subscriptionToken)}`
+      : rawUrl;
+    const subscription = {
+      sourceId,
+      filePath,
+      rawUrl,
+      format,
+      finalUrl,
+      clckTargetUrl: format === 'incy' ? rawUrl : undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    dbUser.sourceSubscriptions = [
+      ...(dbUser.sourceSubscriptions || []).filter((item) => item.sourceId !== sourceId || item.format !== format),
+      subscription,
+    ];
+    return { ...subscription };
+  };
+
+  const checkSimulatedChannels = () => {
+    const requiredChannels = (bot.channels || []).filter((channel: any) => channel.isRequired && channel.id?.trim());
+    const subscribed = dbUser.channelMembership !== 'left';
+    return {
+      allSubscribed: requiredChannels.length === 0 || subscribed,
+      missingChannels: subscribed ? [] : requiredChannels,
+      botNeedsAdminIn: [],
+      errors: [],
+    };
+  };
 
   let inputCmd = (callbackData || text || '').toLowerCase().trim();
   const subUrl = `${host}/api/sub/${dbUser.subscriptionToken}`;
@@ -12117,30 +12196,9 @@ app.post('/api/bot/simulate', async (req, res) => {
 
   if (inputCmd === 'cmd_report_broken_subscription') {
     dbUser.pendingSubscriptionReissue = false;
-    store.feedbackRequests = store.feedbackRequests || [];
-    const pendingRequest = store.feedbackRequests.find((request) =>
-      request.telegramId === dbUser.telegramId &&
-      request.type === 'subscription_reissue' &&
-      request.status === 'pending'
-    );
-    if (!pendingRequest) {
-      store.feedbackRequests.unshift({
-        id: `feedback_reissue_${Date.now()}_${dbUser.telegramId}`,
-        userId: dbUser.id,
-        telegramId: dbUser.telegramId,
-        username: dbUser.username,
-        firstName: dbUser.firstName,
-        type: 'subscription_reissue',
-        reissueFormat: dbUser.subscriptionType === 'happ' ? 'happ' : 'incy',
-        message: 'Пользователь запросил перевыпуск неработающей подписки. Требуется подтверждение администратора.',
-        createdAt: new Date().toISOString(),
-        status: 'pending',
-      });
-    }
-    saveStore();
     return res.json({
       response: {
-        text: '🛠 Запрос на перевыпуск отправлен администратору. Новая подписка будет выдана после подтверждения.',
+        text: '🛠 В реальном боте запрос на перевыпуск будет отправлен администратору. Симуляция не создает заявку.',
         stepKey: 'reissue_pending',
         buttons: [[
           { text: '👤 Мой профиль', callbackData: 'cmd_profile' },
@@ -12155,7 +12213,6 @@ app.post('/api/bot/simulate', async (req, res) => {
     // 1. User clicked button to request unblock
     if (inputCmd === 'cmd_request_unblock') {
       dbUser.pendingUnblockRequest = true;
-      saveStore();
       return res.json({
         response: {
           text: `📝 **Заявка на разблокировку подписки**\n\n` +
@@ -12175,36 +12232,11 @@ app.post('/api/bot/simulate', async (req, res) => {
     // 2. User replied with reason/explanation text
     if (dbUser.pendingUnblockRequest && text && text.trim() && !inputCmd.startsWith('cmd_')) {
       const reasonText = text.trim();
-      const fbItem: FeedbackRequest = {
-        id: `unblock_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        userId: dbUser.id,
-        telegramId: dbUser.telegramId,
-        username: dbUser.username || '',
-        firstName: dbUser.firstName || 'Пользователь',
-        type: 'unblock_request',
-        message: reasonText,
-        banReason: dbUser.subscriptionStatusReason || dbUser.blockedReason || 'Блокировка доступа',
-        blockedAt: dbUser.bannedAt || dbUser.lastActiveAt || new Date().toISOString(),
-        attempts: dbUser.deviceViolationAttempts || 0,
-        createdAt: new Date().toISOString(),
-        status: 'pending',
-        boundDevice: dbUser.boundDevice
-          ? {
-              clientName: dbUser.boundDevice.clientName,
-              ip: dbUser.boundDevice.ip,
-              boundAt: dbUser.boundDevice.boundAt,
-            }
-          : null,
-      };
-
-      if (!store.feedbackRequests) store.feedbackRequests = [];
-      store.feedbackRequests.unshift(fbItem);
       dbUser.pendingUnblockRequest = false;
-      saveStore();
 
       return res.json({
         response: {
-          text: `✅ **Заявка на разблокировку успешно отправлена!**\n\n` +
+          text: `✅ **В реальном боте заявка на разблокировку будет отправлена администратору.**\n\n` +
             `📝 **Ваше сообщение администратору:**\n_${reasonText}_\n\n` +
             `🕒 **Время подачи:** ${clientDeviceTime} (${clientDeviceTz})\n\n` +
             `Администратор рассмотрит заявку в панели управления. После рассмотрения вы сможете получить доступ к подписке заново.`,
@@ -12270,13 +12302,12 @@ app.post('/api/bot/simulate', async (req, res) => {
   // Handle unbind request command from user
   if (inputCmd === 'cmd_request_unbind') {
     dbUser.pendingUnbindRequest = true;
-    saveStore();
     return res.json({
       response: {
         text: `📝 **Запрос на отвязку подписки от устройства**\n\n` +
           `📱 Текущее устройство: **${dbUser.boundDevice?.clientName || 'Привязанное устройство'}**\n\n` +
           `✍️ Пожалуйста, **напишите и отправьте текстовым сообщением причину отвязки** (например: «Купил новый смартфон», «Переустановил клиент», «Заменил роутер»).\n\n` +
-          `Ваше сообщение с причиной мгновенно поступит администратору в раздел **«Обратная связь»**. Администратор нажмет кнопку «Отвязать», обнулит лимит подписки, и вы сможете переполучить доступ!`,
+          `В реальном боте сообщение поступит администратору. Симуляция не создает заявку.`,
         botButtonColor: defaultBtnColor,
         stepKey: 'other',
         buttons: [
@@ -12290,35 +12321,15 @@ app.post('/api/bot/simulate', async (req, res) => {
   if (dbUser.pendingUnbindRequest || (text && !callbackData && !text.startsWith('/') && dbUser.boundDevice)) {
     const reasonText = (text || '').trim();
     if (reasonText) {
-      const feedbackRecord: FeedbackRequest = {
-        id: `fb_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        userId: dbUser.id,
-        telegramId: dbUser.telegramId,
-        username: dbUser.username || '',
-        firstName: dbUser.firstName || 'Пользователь',
-        type: 'unbind_device',
-        message: reasonText,
-        createdAt: new Date().toISOString(),
-        status: 'pending',
-        boundDevice: dbUser.boundDevice ? {
-          clientName: dbUser.boundDevice.clientName,
-          ip: dbUser.boundDevice.ip,
-          boundAt: dbUser.boundDevice.boundAt,
-        } : null,
-      };
-
-      if (!store.feedbackRequests) store.feedbackRequests = [];
-      store.feedbackRequests.unshift(feedbackRecord);
       dbUser.pendingUnbindRequest = false;
-      saveStore();
 
       return res.json({
         response: {
-          text: `✅ **Запрос на отвязку успешно отправлен администратору!**\n\n` +
+          text: `✅ **В реальном боте запрос на отвязку будет отправлен администратору.**\n\n` +
             `👤 **Пользователь:** ${dbUser.firstName} (@${dbUser.username || dbUser.telegramId})\n` +
             `📝 **Причина:** «*${reasonText}*»\n` +
             `📱 **Устройство:** ${dbUser.boundDevice?.clientName || 'Привязано'}\n\n` +
-            `📬 Заявка поступила владельцу сервиса в раздел **«Обратная связь»**. После того как администратор подтвердит отвязку и сбросит лимиты, вы сможете выпустить подписку повторно.`,
+            `Симуляция не создает заявку в разделе «Обратная связь».`,
           botButtonColor: defaultBtnColor,
           stepKey: 'other',
           buttons: [
@@ -12334,7 +12345,6 @@ app.post('/api/bot/simulate', async (req, res) => {
   if (inputCmd === '/start' || inputCmd.startsWith('/start') || inputCmd === 'cmd_menu' || inputCmd === 'cmd_start') {
     if (dbUser.pendingSubscriptionReissue) {
       dbUser.pendingSubscriptionReissue = false;
-      saveStore();
     }
     const isSubActive = Boolean(dbUser.hasActiveSubscription && dbUser.finalSubscriptionUrl);
     const formatName = dbUser.subscriptionType === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
@@ -12387,6 +12397,8 @@ app.post('/api/bot/simulate', async (req, res) => {
       response: {
         text: menuText,
         botButtonColor: defaultBtnColor,
+        mediaType: bot.mediaType || 'none',
+        mediaUrl: bot.mediaUrl || '',
         stepKey: 'welcome',
         buttons: menuButtons,
       },
@@ -12408,7 +12420,7 @@ app.post('/api/bot/simulate', async (req, res) => {
       });
     }
 
-    const displayKey = await resolveUserDisplayKey(dbUser);
+    const displayKey = dbUser.finalSubscriptionUrl || dbUser.finalUrl || '';
     const isHapp = dbUser.subscriptionType === 'happ';
     const formatName = isHapp ? `HAPP (${store.happCryptVersion})` : 'INCY';
     const boundDate = dbUser.boundDevice ? new Date(dbUser.boundDevice.boundAt).toLocaleString('ru-RU') : 'Не привязано (свободный слот)';
@@ -12459,13 +12471,12 @@ app.post('/api/bot/simulate', async (req, res) => {
   }
 
   if (inputCmd === 'cmd_current_source_subscription') {
-    const channelCheck = await botManager.checkAllRequiredChannels(bot, dbUser.telegramId);
+    const channelCheck = checkSimulatedChannels();
     const hasRequiredChannels = (bot.channels || []).some((channel: any) => channel.isRequired && channel.id);
     const cannotVerifyRequiredChannels = hasRequiredChannels &&
       (channelCheck.botNeedsAdminIn.length > 0 || channelCheck.errors.length > 0);
     if (!channelCheck.allSubscribed || cannotVerifyRequiredChannels) {
       if (channelCheck.missingChannels.length > 0) dbUser.channelMembership = 'left';
-      saveStore();
       return res.json({
         response: {
           text: cannotVerifyRequiredChannels
@@ -12503,38 +12514,76 @@ app.post('/api/bot/simulate', async (req, res) => {
       });
     }
 
-    try {
-      const existingSubscription = await getExistingCurrentSourceSubscription(dbUser);
-      if (existingSubscription) {
-        const formatName = existingSubscription.format === 'happ'
-          ? `HAPP (${store.happCryptVersion})`
-          : 'INCY';
-        return res.json({
-          response: {
-            text:
-              `✅ Ваша действующая подписка из текущего источника «${existingSubscription.sourceName}» уже синхронизирована с центральным источником.\n\n` +
-              `Формат: ${formatName}\n\n${existingSubscription.url}`,
-            copyableText: existingSubscription.url,
-            qrData: bot.showQrCode !== false ? existingSubscription.url : undefined,
-            stepKey: 'sub_issued',
-            buttons: [
-              [
-                { text: '👤 Мой профиль', callbackData: 'cmd_profile' },
-                { text: '📋 Инструкция', callbackData: 'cmd_instructions' },
-              ],
-              [{ text: '🛠 Подписка не работает — перевыпустить', callbackData: 'cmd_report_broken_subscription' }],
-              [{ text: '⬅️ Главное меню', callbackData: 'cmd_menu' }],
+    const activeSource = getActiveGitSource();
+    const format = dbUser.subscriptionType === 'incy' ? 'incy' : 'happ';
+    const existingSubscription = dbUser.sourceSubscriptions?.find(
+      (item) => item.sourceId === activeSource.id && item.format === format
+    );
+    if (existingSubscription) {
+      const formatName = existingSubscription.format === 'happ'
+        ? `HAPP (${store.happCryptVersion})`
+        : 'INCY';
+      return res.json({
+        response: {
+          text:
+            `✅ Ваша действующая подписка из текущего источника «${activeSource.name}» уже синхронизирована с центральным источником.\n\n` +
+            `Формат: ${formatName}\n\n${existingSubscription.finalUrl}`,
+          copyableText: existingSubscription.finalUrl,
+          qrData: bot.showQrCode !== false ? existingSubscription.finalUrl : undefined,
+          stepKey: 'sub_issued',
+          buttons: [
+            [
+              { text: '👤 Мой профиль', callbackData: 'cmd_profile' },
+              { text: '📋 Инструкция', callbackData: 'cmd_instructions' },
             ],
-          },
-        });
-      }
+            [{ text: '🛠 Подписка не работает — перевыпустить', callbackData: 'cmd_report_broken_subscription' }],
+            [{ text: '⬅️ Главное меню', callbackData: 'cmd_menu' }],
+          ],
+        },
+      });
+    }
+
+    try {
+      const subscription = createSimulationSubscription(format);
+      dbUser.gitFilePath = subscription.filePath;
+      dbUser.gitRawUrl = subscription.rawUrl;
+      dbUser.finalSubscriptionUrl = subscription.finalUrl;
+      dbUser.subscriptionType = format;
+      dbUser.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
+      dbUser.subscriptionSourceId = activeSource.id;
+      dbUser.status = 'active';
+      dbUser.hasActiveSubscription = true;
+      const displayKey = subscription.finalUrl;
+      dbUser.finalSubscriptionUrl = displayKey;
+      dbUser.finalUrl = displayKey;
+      dbUser.clckUrl = displayKey;
+
+      const formatName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
+      return res.json({
+        response: {
+          text:
+            `✅ Подписка из текущего источника «${activeSource.name}» подготовлена.\n\n` +
+            `Формат: ${formatName}\n\n${displayKey}\n\nСимуляция использует тестовую ссылку, файл в Git не создавался.`,
+          copyableText: displayKey,
+          qrData: bot.showQrCode !== false ? displayKey : undefined,
+          fireworks: bot.enableFireworks !== false && store.replacementTemplates.enableFireworks !== false,
+          stepKey: 'sub_issued',
+          buttons: [
+            [
+              { text: '👤 Мой профиль', callbackData: 'cmd_profile' },
+              { text: '📋 Инструкция', callbackData: 'cmd_instructions' },
+            ],
+            [{ text: '🛠 Подписка не работает — перевыпустить', callbackData: 'cmd_report_broken_subscription' }],
+            [{ text: '⬅️ Главное меню', callbackData: 'cmd_menu' }],
+          ],
+        },
+      });
     } catch (err: any) {
-      console.error(`[Current source subscription check failed for ${dbUser.telegramId}]:`, err.message);
       return res.status(502).json({
         success: false,
-        message: 'Не удалось проверить файл подписки в текущем источнике. Новая ссылка не создана.',
+        message: 'Не удалось подготовить тестовую подписку.',
         response: {
-          text: '⚠️ Не удалось проверить файл подписки в текущем источнике. Новая ссылка не создана. Попробуйте позже или обратитесь в поддержку.',
+          text: `⚠️ Не удалось подготовить тестовую подписку. ${err.message || ''}`,
         },
       });
     }
@@ -12663,13 +12712,12 @@ app.post('/api/bot/simulate', async (req, res) => {
 
   // Step 5: Issue or re-select subscription in the chosen format.
   if (inputCmd === 'cmd_issue_happ' || inputCmd === 'cmd_issue_incy') {
-    const channelCheck = await botManager.checkAllRequiredChannels(bot, dbUser.telegramId);
+    const channelCheck = checkSimulatedChannels();
     const hasRequiredChannels = (bot.channels || []).some((channel: any) => channel.isRequired && channel.id);
     const cannotVerifyRequiredChannels = hasRequiredChannels &&
       (channelCheck.botNeedsAdminIn.length > 0 || channelCheck.errors.length > 0);
     if (!channelCheck.allSubscribed || cannotVerifyRequiredChannels) {
       if (channelCheck.missingChannels.length > 0) dbUser.channelMembership = 'left';
-      saveStore();
       return res.json({
         response: {
           text: cannotVerifyRequiredChannels
@@ -12709,48 +12757,8 @@ app.post('/api/bot/simulate', async (req, res) => {
 
     const isHapp = inputCmd === 'cmd_issue_happ';
     const format = isHapp ? 'happ' : 'incy';
-    const isReissue = dbUser.pendingSubscriptionReissue === true;
-    const previousSubscription = isReissue
-      ? dbUser.sourceSubscriptions?.find((item: any) => item.sourceId === dbUser.subscriptionSourceId && item.filePath === dbUser.gitFilePath) ||
-        dbUser.sourceSubscriptions?.find((item: any) => item.sourceId === dbUser.subscriptionSourceId) ||
-        (dbUser.gitFilePath && dbUser.subscriptionSourceId
-          ? { sourceId: dbUser.subscriptionSourceId, filePath: dbUser.gitFilePath }
-          : undefined)
-      : undefined;
-
-    // Get or allocate user subscription (re-uses existing file if already issued!)
-    const { filePath, rawUrl, finalUrl } = await ensureUserRepoFile(dbUser, format, isReissue);
-    let previousFileCleanupFailed = false;
-    if (isReissue && previousSubscription && previousSubscription.filePath !== filePath) {
-      let deleted = false;
-      try {
-        deleted = await deleteUserRepoFile(previousSubscription.sourceId, previousSubscription.filePath);
-      } catch (cleanupError: any) {
-        console.warn(`[Webhook subscription reissue] Failed to delete previous file for ${dbUser.telegramId}:`, cleanupError.message);
-      }
-      if (deleted) {
-        dbUser.sourceSubscriptions = (dbUser.sourceSubscriptions || []).filter(
-          (item: any) => item.sourceId !== previousSubscription.sourceId || item.filePath !== previousSubscription.filePath
-        );
-        store.repoFiles = (store.repoFiles || []).filter(
-          (item) => item.sourceId !== previousSubscription.sourceId || item.filePath !== previousSubscription.filePath
-        );
-      } else {
-        previousFileCleanupFailed = true;
-      }
-    }
+    const { filePath, rawUrl, finalUrl, sourceId } = createSimulationSubscription(format);
     dbUser.pendingSubscriptionReissue = false;
-    if (isReissue && !previousFileCleanupFailed) {
-      const feedback = store.feedbackRequests?.find((request) =>
-        request.telegramId === dbUser.telegramId &&
-        request.status === 'pending' &&
-        request.message === 'Пользователь сообщил, что подписка не работает, и запросил перевыпуск.'
-      );
-      if (feedback) {
-        feedback.status = 'resolved';
-        feedback.resolvedAt = new Date().toISOString();
-      }
-    }
 
     const subTypeName = isHapp ? `HAPP (${store.happCryptVersion})` : 'INCY';
     const totalServers = 'содержимое центрального источника без преобразований';
@@ -12763,11 +12771,9 @@ app.post('/api/bot/simulate', async (req, res) => {
     dbUser.gitFilePath = filePath;
     dbUser.gitRawUrl = rawUrl;
     dbUser.finalSubscriptionUrl = finalUrl;
-    saveStore();
-
-    const displayKey = await resolveUserDisplayKey(dbUser);
+    dbUser.subscriptionSourceId = sourceId;
+    const displayKey = finalUrl;
     dbUser.finalSubscriptionUrl = displayKey;
-    saveStore();
 
     const shouldShowQr = bot.showQrCode !== false;
     const fireworksEnabled = bot.enableFireworks !== false && store.replacementTemplates.enableFireworks !== false;
@@ -12789,13 +12795,9 @@ app.post('/api/bot/simulate', async (req, res) => {
       hours: bot.selfDeleteHours || 72,
       qrNotice: qrTextNotice,
     });
-    const cleanupWarning = previousFileCleanupFailed
-      ? '\n\n⚠️ Новая подписка создана, но удалить предыдущий файл из старого Git-источника не удалось. Обратитесь к администратору для очистки.'
-      : '';
-
     return res.json({
       response: {
-        text: `${successMsg}${cleanupWarning}`,
+        text: `${successMsg}\n\nСимуляция использует тестовую ссылку, файл в Git не создавался.`,
         copyableText: displayKey,
         qrData: shouldShowQr ? displayKey : undefined,
         fireworks: fireworksEnabled,
@@ -12826,17 +12828,16 @@ app.post('/api/bot/simulate', async (req, res) => {
   if (inputCmd === 'cmd_refresh') {
     dbUser.subscriptionToken = `sub_${dbUser.username || dbUser.telegramId}_${Math.random().toString(36).substring(2, 8)}`;
     const format = dbUser.subscriptionType === 'incy' ? 'incy' : 'happ';
-    const resSub = await ensureUserRepoFile(dbUser, format);
+    const resSub = createSimulationSubscription(format);
     const filePath = resSub.filePath;
     const finalUrl = resSub.finalUrl;
 
     dbUser.receivedAt = new Date().toISOString();
-    saveStore();
 
     const shouldShowQr = bot.showQrCode !== false;
     return res.json({
       response: {
-        text: `🔄 Конфигурация серверов и персональный файл \`${filePath}\` обновлены!\n\nНовая ссылка:\n\`${finalUrl}\``,
+        text: `🔄 Тестовая конфигурация обновлена!\n\nНовая тестовая ссылка:\n\`${finalUrl}\`\n\nФайл \`${filePath}\` в Git не создавался.`,
         copyableText: finalUrl,
         qrData: shouldShowQr ? finalUrl : undefined,
         botButtonColor: defaultBtnColor,
