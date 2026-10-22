@@ -52,6 +52,12 @@ export function getDirectAppBaseUrl(): string {
   if (process.env.APP_URL && !process.env.APP_URL.includes('localhost')) {
     return process.env.APP_URL.replace(/\/+$/, '');
   }
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+  }
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    return `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`.replace(/\/+$/, '');
+  }
   return 'https://ais-dev-uk2utyav43cs7ezzsebkz7-469954892016.us-west2.run.app';
 }
 
@@ -2130,36 +2136,12 @@ function isClckShortUrl(url: string | undefined): url is string {
 }
 
 function getUserSubscriptionTargetUrl(user: any): string {
-  const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
-  const subscription = user.sourceSubscriptions?.find(
-    (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
-  ) || user.sourceSubscriptions?.find((item: any) => item.sourceId === user.subscriptionSourceId);
-  const source = store.gitSources?.find((item: GitSourceItem) => item.id === user.subscriptionSourceId) || getActiveGitSource();
-  const filePath = subscription?.filePath || user.gitFilePath || `subs/${token}.txt`;
-  const repoFile = store.repoFiles?.find(
-    (item: RepoUserFile) =>
-      item.sourceId === source.id && item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '')
-  );
-  const candidates = [
-    subscription?.rawUrl,
-    repoFile?.rawUrl,
-    user.subscriptionSourceId === source.id ? user.gitRawUrl : undefined,
-  ];
-  const storedRawUrl = candidates.find((url): url is string =>
-    Boolean(url && isRepositoryRawUrl(source, url, filePath))
-  );
-  if (storedRawUrl) return storedRawUrl;
-  const repoFileSha = repoFile?.sha;
-  if (source.provider === 'sourcecraft' && repoFileSha && /^[0-9a-f]{40}$/i.test(repoFileSha)) {
-    const repository = (source.repository || 'Vaynet/bot').replace(/^\/+|\/+$/g, '');
-    return `https://raw.sourcecraft.tech/raw/${repository}/${repoFileSha}/${filePath.replace(/^\/+/, '')}`;
-  }
-  return buildGitRawUrl(source, filePath);
+  return getUserSubscriptionGatewayUrl(user);
 }
 
-function getUserSubscriptionGatewayUrl(user: BotUser): string {
+function getUserSubscriptionGatewayUrl(user: BotUser, sourceId = user.subscriptionSourceId || getActiveGitSource().id): string {
   const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
-  return getRepositorySubscriptionGatewayUrl(token);
+  return getRepositorySubscriptionGatewayUrl(token, sourceId);
 }
 
 function getUserHappRedirectUrl(user: BotUser): string {
@@ -2167,8 +2149,17 @@ function getUserHappRedirectUrl(user: BotUser): string {
   return getHappRedirectUrl(token);
 }
 
-function getRepositorySubscriptionGatewayUrl(token: string): string {
-  return `${getAppBaseUrl()}/api/repo-sub/${encodeURIComponent(token)}`;
+function getRepositorySubscriptionGatewayUrl(token: string, sourceId?: string): string {
+  const query = sourceId ? `?source=${encodeURIComponent(sourceId)}` : '';
+  return `${getDirectAppBaseUrl()}/api/repo-sub/${encodeURIComponent(token)}${query}`;
+}
+
+function getExclusionSubscriptionGatewayUrl(exclusion: ExclusionSubscription): string {
+  const repoFile = store.repoFiles?.find((item) =>
+    item.filePath === exclusion.gitFilePath &&
+    (item.userId === `excl_${exclusion.token}` || item.userId === exclusion.userId)
+  );
+  return getRepositorySubscriptionGatewayUrl(exclusion.token, repoFile?.sourceId || getActiveGitSource().id);
 }
 
 function getHappRedirectUrl(token: string): string {
@@ -2300,6 +2291,8 @@ async function getExistingCurrentSourceSubscription(
     user.detachedFromCentral
   ) return null;
 
+  await pullLatestCentralContent();
+
   const linkedRepoFile = store.repoFiles?.find(
     (item) =>
       item.sourceId === source.id &&
@@ -2351,17 +2344,13 @@ async function getExistingCurrentSourceSubscription(
     (format === 'incy' && !isClckShortUrl(finalUrl))
   ) return null;
 
-  const response = await fetch(rawUrl, { signal: AbortSignal.timeout(12000) });
-  if (!response.ok) return null;
-  const remoteContent = await response.text();
-  if (crypto.createHash('sha256').update(remoteContent).digest('hex') !== repoFile.contentHash) return null;
-  const targetUrl = format === 'incy' ? rawUrl : getUserHappRedirectUrl(user);
+  const targetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user, source.id) : getUserHappRedirectUrl(user);
   let currentFinalUrl = finalUrl;
   if (format === 'incy' && (
-    subscription.clckTargetUrl !== rawUrl ||
+    subscription.clckTargetUrl !== targetUrl ||
     !isClckShortUrl(finalUrl)
   )) {
-    currentFinalUrl = await shortenIncyUrl(rawUrl, user.subscriptionToken);
+    currentFinalUrl = await shortenIncyUrl(targetUrl, user.subscriptionToken);
   }
 
   user.subscriptionSourceId = source.id;
@@ -2450,7 +2439,7 @@ async function refreshUserSubscriptionLink(
     throw new Error(`Источник не вернул действительный RAW-адрес файла ${filePath}`);
   }
   const isCurrentSource = user.subscriptionSourceId === sourceId || !user.subscriptionSourceId;
-  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : rawUrl;
+  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user, sourceId);
 
   if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
   let subscription = user.sourceSubscriptions.find(
@@ -2597,16 +2586,6 @@ async function shortenIncyUrl(rawUrl: string, _tokenSafe?: string): Promise<stri
 async function resolveUserDisplayKey(user: any): Promise<string> {
   const isHapp = user.subscriptionType === 'happ';
   const token = user.subscriptionToken || `sub_${user.username || user.telegramId}`;
-  const targetBaseUrl = getUserSubscriptionTargetUrl(user);
-  const source = store.gitSources?.find((item: GitSourceItem) => item.id === user.subscriptionSourceId) || getActiveGitSource();
-  const targetFilePath =
-    user.sourceSubscriptions?.find((item: any) => item.sourceId === source.id && item.filePath === user.gitFilePath)?.filePath ||
-    user.sourceSubscriptions?.find((item: any) => item.sourceId === source.id)?.filePath ||
-    user.gitFilePath ||
-    `subs/${token}.txt`;
-  if (!isRepositoryRawUrl(source, targetBaseUrl, targetFilePath)) {
-    throw new Error(`Ссылка подписки не является RAW-ссылкой источника «${source.name}»`);
-  }
 
   if (isHapp) {
     const happTargetUrl = getUserHappRedirectUrl(user);
@@ -2615,7 +2594,7 @@ async function resolveUserDisplayKey(user: any): Promise<string> {
     saveStore();
     return happUrl;
   } else {
-    const targetUrl = getUserSubscriptionTargetUrl(user);
+    const targetUrl = getUserSubscriptionGatewayUrl(user);
     const subscription = user.sourceSubscriptions?.find(
       (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
     );
@@ -3385,15 +3364,16 @@ async function ensureUserRepoFile(
   }
 
   let finalUrl = '';
+  const incyTargetUrl = getUserSubscriptionGatewayUrl(user, activeGit.id);
   if (format === 'happ') {
     finalUrl = buildHappCryptUrl(getUserHappRedirectUrl(user));
   } else {
     const existingTargetUrl = sourceSubscription?.clckTargetUrl ||
       (user.subscriptionSourceId === activeGit.id && user.gitFilePath === filePath ? user.clckTargetUrl : undefined);
     const existingFinalUrl = sourceSubscription?.finalUrl || existingRepoFile?.finalUrl;
-    finalUrl = existingTargetUrl === gitRawUrl && isClckShortUrl(existingFinalUrl)
+    finalUrl = existingTargetUrl === incyTargetUrl && isClckShortUrl(existingFinalUrl)
       ? existingFinalUrl
-      : await shortenIncyUrl(gitRawUrl, tokenSafe);
+      : await shortenIncyUrl(incyTargetUrl, tokenSafe);
   }
   if (format === 'happ' && !isHappUrlForVersion(finalUrl, store.happCryptVersion)) {
     throw new Error(`Не удалось сформировать HAPP-ссылку формата ${store.happCryptVersion}.`);
@@ -3451,7 +3431,7 @@ async function ensureUserRepoFile(
   user.finalSubscriptionUrl = finalUrl;
   user.finalUrl = finalUrl;
   user.clckUrl = finalUrl;
-  user.clckTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : gitRawUrl;
+  user.clckTargetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : incyTargetUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY (VLESS)';
   user.hasActiveSubscription = true;
@@ -3507,7 +3487,7 @@ async function ensureUserRepoFile(
     rawUrl: gitRawUrl,
     format,
     finalUrl,
-    clckTargetUrl: format === 'incy' ? gitRawUrl : undefined,
+    clckTargetUrl: format === 'incy' ? incyTargetUrl : undefined,
     updatedAt: new Date().toISOString(),
   });
 
@@ -4534,34 +4514,35 @@ async function syncGitSourceSubscribersWithCentral(activeGit: GitSourceItem, opt
   return lastCentralSyncStats;
 }
 
-// Periodic monitor for external central raw URL changes
+// Poll the authenticated repository so private sources can propagate central file changes.
+let lastCentralMonitorFailureAt = 0;
+
 async function monitorAndPullCentralSubscription(): Promise<void> {
   if (store.centralFile.autoSyncEnabled === false) return;
   const git = getActiveGitSource();
-  const urlToPull = store.centralFile.centralRawUrl || git.centralRawUrl || buildGitRawUrl(git, store.centralFile.filename || 'L');
-  if (!urlToPull || !urlToPull.startsWith('http')) return;
+  const filePath = store.centralFile.filename || git.filePath || 'L';
 
   try {
-    const resp = await fetch(urlToPull, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'text/plain, */*',
-      },
-    });
-    if (resp.ok) {
-      const text = await resp.text();
-      if (text && text.trim() && text !== store.centralFile.content) {
-        console.log(`[Central Monitor] Detected updates in central source (${urlToPull})! Propagating to subscribers...`);
-        store.centralFile.content = text;
-        store.centralFile.lastUpdatedAt = new Date().toISOString();
-        store.centralFile.lastCommitMessage = `Pulled from central raw at ${new Date().toLocaleTimeString('ru-RU')}`;
-        store.centralFile.isSyncedWithRepo = true;
-        saveStore();
-        await syncActiveSubscribersWithCentral();
-      }
+    const text = await readCurrentRepositoryFile(git, filePath);
+    if (text.trim() && text !== store.centralFile.content) {
+      console.log(`[Central Monitor] Detected updates in ${git.name}/${filePath}; propagating to subscribers...`);
+      store.centralFile.content = text;
+      store.centralFile.lastUpdatedAt = new Date().toISOString();
+      store.centralFile.lastCommitMessage = `Pulled from ${git.name} at ${new Date().toLocaleTimeString('ru-RU')}`;
+      store.centralFile.isSyncedWithRepo = true;
+      saveStore();
+      await syncActiveSubscribersWithCentral();
     }
   } catch (err: any) {
-    // Non-critical background network error
+    const now = Date.now();
+    if (now - lastCentralMonitorFailureAt >= 60000) {
+      lastCentralMonitorFailureAt = now;
+      console.warn(`[Central Monitor] Failed to read ${git.name}/${filePath}:`, err.message);
+      logSystemEvent('warning', 'sync', 'CENTRAL_MONITOR_READ_FAILED', `Не удалось проверить центральный файл ${git.name}/${filePath}: ${err.message}`, {
+        sourceId: git.id,
+        filePath,
+      });
+    }
   }
 }
 
@@ -4785,33 +4766,7 @@ function computeSyncHealthReport() {
 async function pullLatestCentralContent(): Promise<void> {
   const activeGit = getActiveGitSource();
   const filePath = store.centralFile.filename || activeGit.filePath || 'L';
-  let rawUrl = '';
-  let content: string;
-  if (activeGit.provider === 'sourcecraft') {
-    content = await readCurrentRepositoryFile(activeGit, filePath);
-    rawUrl = buildGitRawUrl(activeGit, filePath) ||
-      store.centralFile.centralRawUrl ||
-      activeGit.centralRawUrl ||
-      '';
-  } else {
-    rawUrl = store.centralFile.centralRawUrl || activeGit.centralRawUrl || buildGitRawUrl(activeGit, filePath);
-    if (!rawUrl) {
-      throw new Error(`Не настроена RAW-ссылка центрального файла в источнике «${activeGit.name}»`);
-    }
-    const response = await fetch(rawUrl, {
-      headers: {
-        'User-Agent': 'PulsAccess/2.0',
-        Accept: 'text/plain, */*',
-        'Cache-Control': 'no-cache',
-        Pragma: 'no-cache',
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!response.ok) {
-      throw new Error(`Не удалось прочитать центральный файл из ${activeGit.name}: HTTP ${response.status}`);
-    }
-    content = await response.text();
-  }
+  const content = await readCurrentRepositoryFile(activeGit, filePath);
   if (!content.trim()) {
     throw new Error(`Центральный файл в источнике «${activeGit.name}» пуст; синхронизация отменена`);
   }
@@ -4820,6 +4775,7 @@ async function pullLatestCentralContent(): Promise<void> {
   const latestHash = crypto.createHash('sha256').update(content).digest('hex');
   if (previousHash !== latestHash) {
     store.centralFile.content = content;
+    const rawUrl = buildGitRawUrl(activeGit, filePath) || store.centralFile.centralRawUrl || activeGit.centralRawUrl || '';
     if (rawUrl) store.centralFile.centralRawUrl = rawUrl;
     store.centralFile.lastUpdatedAt = new Date().toISOString();
     store.centralFile.lastCommitMessage = `Pulled before subscriber force-resync from ${activeGit.name}`;
@@ -5657,7 +5613,7 @@ app.get('/api/exclusions', async (req, res) => {
       if (repoFile) repoFile.finalUrl = excl.happUrl;
       migratedLinks = true;
     }
-    const clckTargetUrl = excl.gitRawUrl || '';
+    const clckTargetUrl = getExclusionSubscriptionGatewayUrl(excl);
     if (
       excl.gitFilePath &&
       excl.gitRawUrl &&
@@ -5811,7 +5767,7 @@ app.post('/api/exclusions', async (req, res) => {
 
   // INCY version: shortened clck.ru link (e.g. https://clck.ru/3W7gT2)
   let clckUrl = '';
-  const clckTargetUrl = gitRawUrl;
+  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token, activeGit.id);
   try {
     clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
@@ -6073,7 +6029,7 @@ app.post('/api/exclusions/:id/sync', async (req, res) => {
     }
   }
 
-  const clckTargetUrl = target.gitRawUrl || '';
+  const clckTargetUrl = getExclusionSubscriptionGatewayUrl(target);
   if (target.gitRawUrl && (!isClckShortUrl(target.clckUrl) || target.clckTargetUrl !== clckTargetUrl)) {
     try {
       const short = await shortenIncyUrl(clckTargetUrl, target.token);
@@ -6110,20 +6066,20 @@ app.post('/api/exclusions/:id/shorten-clck', async (req, res) => {
   const target = store.exclusions.find((e) => e.id === id);
   if (!target) return res.status(404).json({ success: false, message: 'Исключение не найдено' });
 
-  const rawUrl = target.gitRawUrl;
-  if (!rawUrl) {
+  if (!target.gitRawUrl) {
     return res.status(400).json({ success: false, message: 'У исключения нет RAW-ссылки на файл в репозитории.' });
   }
+  const subscriptionUrl = getExclusionSubscriptionGatewayUrl(target);
   let shortUrl: string;
   try {
-    shortUrl = await shortenIncyUrl(rawUrl, target.token);
+    shortUrl = await shortenIncyUrl(subscriptionUrl, target.token);
   } catch (err: any) {
     console.error(`[Exclusion manual shorten failed] ${target.token}:`, err.message);
     return res.status(502).json({ success: false, message: err.message });
   }
   target.clckUrl = shortUrl;
   target.incyUrl = shortUrl;
-  target.clckTargetUrl = rawUrl;
+  target.clckTargetUrl = subscriptionUrl;
   saveStore();
 
   res.json({ success: true, clckUrl: shortUrl, exclusion: target });
@@ -6223,7 +6179,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
 
   // INCY (clck.ru encrypted link)
   let clckUrl = '';
-  const clckTargetUrl = gitRawUrl;
+  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token, activeGit.id);
   try {
     clckUrl = await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
@@ -6256,7 +6212,7 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
       rawUrl: gitRawUrl,
       format: format === 'happ' ? 'happ' : 'incy',
       finalUrl: format === 'happ' ? happUrl : incyUrl,
-      clckTargetUrl: format === 'incy' ? gitRawUrl : undefined,
+      clckTargetUrl: format === 'incy' ? clckTargetUrl : undefined,
       updatedAt: new Date().toISOString(),
     }],
     subscriptionExpiresAt: null,
@@ -9801,9 +9757,10 @@ app.post('/api/central-file', async (req, res) => {
 });
 
 app.post('/api/central-file/sync', async (req, res) => {
-  const { direction, centralRawUrl, content } = req.body;
+  const { direction, content } = req.body;
   const git = getActiveGitSource();
-  const urlToPull = centralRawUrl || store.centralFile.centralRawUrl || git.centralRawUrl || buildGitRawUrl(git, store.centralFile.filename || 'L');
+  const targetFile = store.centralFile.filename || git.filePath || 'L';
+  const urlToPull = buildGitRawUrl(git, targetFile) || store.centralFile.centralRawUrl || git.centralRawUrl || '';
 
   let syncMsg = '';
   let syncResult: CentralSyncResult | undefined;
@@ -9816,38 +9773,25 @@ app.post('/api/central-file/sync', async (req, res) => {
   }
   if (direction === 'pull') {
     try {
-      const resp = await fetch(urlToPull, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-          'Accept': 'text/plain, */*',
-        },
-      });
-      if (resp.ok) {
-        const text = await resp.text();
-        if (text && text.trim()) {
-          store.centralFile.content = text;
-          store.centralFile.centralRawUrl = urlToPull;
-          store.centralFile.lastUpdatedAt = new Date().toISOString();
-          store.centralFile.isSyncedWithRepo = true;
-          const stats = parseNodeStats(text);
-          syncMsg = `Конфигурация загружена из ${git.name}: ${urlToPull} (${stats.total} элементов)`;
-          logSystemEvent('success', 'sync', 'CENTRAL_PULLED', syncMsg, { url: urlToPull, nodes: stats.total });
-          syncResult = await syncActiveSubscribersWithCentral({
-            forceFullGitPush: true,
-            backgroundGitPush: false,
-          });
-        } else {
-          syncMsg = `Источник ${urlToPull} вернул пустой ответ. Конфигурация не изменена.`;
-          logSystemEvent('warning', 'gitverse', 'PULL_EMPTY', syncMsg, { url: urlToPull });
-          return res.status(400).json({ success: false, message: syncMsg, stats: parseNodeStats(store.centralFile.content) });
-        }
-      } else {
-        syncMsg = `Источник ответил HTTP ${resp.status} ${resp.statusText}. Проверьте доступность ссылки.`;
-        logSystemEvent('error', 'gitverse', 'PULL_FAILED', syncMsg, { url: urlToPull, status: resp.status });
-        return res.status(resp.status || 400).json({ success: false, message: syncMsg, stats: parseNodeStats(store.centralFile.content) });
+      const text = await readCurrentRepositoryFile(git, targetFile);
+      if (!text.trim()) {
+        syncMsg = `Источник ${git.name} вернул пустой ответ. Конфигурация не изменена.`;
+        logSystemEvent('warning', 'gitverse', 'PULL_EMPTY', syncMsg, { filePath: targetFile });
+        return res.status(400).json({ success: false, message: syncMsg, stats: parseNodeStats(store.centralFile.content) });
       }
+      store.centralFile.content = text;
+      if (urlToPull) store.centralFile.centralRawUrl = urlToPull;
+      store.centralFile.lastUpdatedAt = new Date().toISOString();
+      store.centralFile.isSyncedWithRepo = true;
+      const stats = parseNodeStats(text);
+      syncMsg = `Конфигурация загружена из ${git.name}: ${targetFile} (${stats.total} элементов)`;
+      logSystemEvent('success', 'sync', 'CENTRAL_PULLED', syncMsg, { filePath: targetFile, nodes: stats.total });
+      syncResult = await syncActiveSubscribersWithCentral({
+        forceFullGitPush: true,
+        backgroundGitPush: false,
+      });
     } catch (fetchErr: any) {
-      syncMsg = `Сбой чтения из источника ${urlToPull}: ${fetchErr.message}`;
+      syncMsg = `Сбой чтения файла ${targetFile} из источника ${git.name}: ${fetchErr.message}`;
       logSystemEvent('error', 'gitverse', 'PULL_EXCEPTION', syncMsg, { error: fetchErr.message });
       return res.status(500).json({ success: false, message: syncMsg });
     }
@@ -9980,31 +9924,31 @@ app.post('/api/sync/deep-audit-force', async (req, res) => {
     const cleanToken = activeGit.token.trim();
     const centralFile = store.centralFile.filename || 'L';
 
-    // Step 1: Pull the latest central subscription directly from GitVerse remote repository
+    // Step 1: Pull the latest central subscription using the configured Git credentials.
     let remoteCentralPulled = false;
     let remoteCentralContent = '';
-    const rawUrlToPull = store.centralFile.centralRawUrl || activeGit.centralRawUrl || buildGitRawUrl(activeGit, centralFile);
     try {
-      const remoteRes = await fetch(rawUrlToPull, {
-        headers: { 'User-Agent': 'PulsAccess/2.0', 'Accept': 'text/plain, */*' },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (remoteRes.ok) {
-        remoteCentralContent = await remoteRes.text();
-        if (remoteCentralContent && remoteCentralContent.trim()) {
-          const prevHash = crypto.createHash('sha256').update(store.centralFile.content || '').digest('hex');
-          const newHash = crypto.createHash('sha256').update(remoteCentralContent).digest('hex');
-          if (prevHash !== newHash) {
-            store.centralFile.content = remoteCentralContent;
-            store.centralFile.lastUpdatedAt = new Date().toISOString();
-            store.centralFile.lastCommitMessage = `Deep Audit auto-pulled from remote repository at ${new Date().toLocaleTimeString('ru-RU')}`;
-            remoteCentralPulled = true;
-            logSystemEvent('info', 'sync', 'REMOTE_CENTRAL_UPDATED', `Центральное содержимое обновлено из удаленного репозитория (${Buffer.byteLength(remoteCentralContent, 'utf-8')} байт)`, { path: centralFile, length: remoteCentralContent.length });
-          }
-        }
-      }
+      remoteCentralContent = await readCurrentRepositoryFile(activeGit, centralFile);
     } catch (err: any) {
-      logSystemEvent('warning', 'gitverse', 'REMOTE_PULL_WARNING', `Предупреждение при чтении центрального файла из Git: ${err.message}`);
+      const message = `Не удалось прочитать центральный файл ${centralFile} из ${activeGit.name}: ${err.message}`;
+      logSystemEvent('error', 'sync', 'REMOTE_CENTRAL_PULL_FAILED', message, { sourceId: activeGit.id, filePath: centralFile });
+      return res.status(502).json({ success: false, message });
+    }
+    if (!remoteCentralContent.trim()) {
+      const message = `Центральный файл ${centralFile} в ${activeGit.name} пуст; синхронизация отменена.`;
+      logSystemEvent('error', 'sync', 'REMOTE_CENTRAL_PULL_EMPTY', message, { sourceId: activeGit.id, filePath: centralFile });
+      return res.status(502).json({ success: false, message });
+    }
+    {
+      const prevHash = crypto.createHash('sha256').update(store.centralFile.content || '').digest('hex');
+      const newHash = crypto.createHash('sha256').update(remoteCentralContent).digest('hex');
+      if (prevHash !== newHash) {
+        store.centralFile.content = remoteCentralContent;
+        store.centralFile.lastUpdatedAt = new Date().toISOString();
+        store.centralFile.lastCommitMessage = `Deep Audit auto-pulled from ${activeGit.name} at ${new Date().toLocaleTimeString('ru-RU')}`;
+        remoteCentralPulled = true;
+        logSystemEvent('info', 'sync', 'REMOTE_CENTRAL_UPDATED', `Центральное содержимое обновлено из удаленного репозитория (${Buffer.byteLength(remoteCentralContent, 'utf-8')} байт)`, { path: centralFile, length: remoteCentralContent.length });
+      }
     }
 
     // Step 2: Clear in-memory caches to guarantee bypass-cache behavior
@@ -11694,24 +11638,33 @@ app.get('/api/repo-sub/:token', async (req, res) => {
   if (!user && !exclusion) {
     return res.status(404).send('Подписка не найдена');
   }
-  const sourceSubscription = linkedUser?.sourceSubscriptions?.find((item) =>
-    !linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId
+  const requestedSourceId = typeof req.query.source === 'string' ? req.query.source : undefined;
+  const sourceSubscription = linkedUser?.sourceSubscriptions?.find(
+    (item) =>
+      (!requestedSourceId || item.sourceId === requestedSourceId) &&
+      (!linkedUser.subscriptionSourceId || requestedSourceId || item.sourceId === linkedUser.subscriptionSourceId)
   );
-  const filePath = linkedUser?.gitFilePath || sourceSubscription?.filePath || exclusion?.gitFilePath;
+  const filePath = exclusion?.gitFilePath || sourceSubscription?.filePath ||
+    (!requestedSourceId || requestedSourceId === linkedUser?.subscriptionSourceId ? linkedUser?.gitFilePath : undefined);
   if (!filePath) {
     return res.status(404).send('Файл подписки не привязан к репозиторию');
   }
 
-  const repoFile = store.repoFiles?.find((item) =>
-    item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
-    (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
-    (!linkedUser || !item.userId || item.userId === linkedUser.id)
-  );
   const matchingSourceSubscription = linkedUser?.sourceSubscriptions?.find((item) =>
     item.filePath === filePath &&
-    (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
+    (!requestedSourceId || item.sourceId === requestedSourceId) &&
+    (!linkedUser.subscriptionSourceId || requestedSourceId || item.sourceId === linkedUser.subscriptionSourceId)
   );
-  const sourceId = linkedUser?.subscriptionSourceId || matchingSourceSubscription?.sourceId || repoFile?.sourceId;
+  const repoFile = store.repoFiles?.find((item) =>
+    item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
+    (!requestedSourceId || item.sourceId === requestedSourceId) &&
+    (exclusion
+      ? item.userId === `excl_${token}` || item.userId === exclusion.userId || !item.userId
+      : (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
+        (!linkedUser || !item.userId || item.userId === linkedUser.id))
+  );
+  const sourceId = requestedSourceId || matchingSourceSubscription?.sourceId || repoFile?.sourceId ||
+    (exclusion ? undefined : linkedUser?.subscriptionSourceId);
   const source = sourceId
     ? store.gitSources?.find((item) => item.id === sourceId)
     : getActiveGitSource();
@@ -11725,6 +11678,7 @@ app.get('/api/repo-sub/:token', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+    setUnlimitedSubscriptionHeaders(res, linkedUser || exclusion);
     return res.send(content);
   } catch (err: any) {
     console.error(`[Repository subscription proxy] Failed to read ${source.name}/${filePath}:`, err.message);
@@ -11744,14 +11698,7 @@ app.get('/api/happ-sub/:token', async (req, res) => {
     return res.status(404).send('Подписка не найдена');
   }
 
-  const sourceSubscription = linkedUser?.sourceSubscriptions?.find(
-    (item) =>
-      item.filePath === linkedUser.gitFilePath &&
-      (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
-  ) || linkedUser?.sourceSubscriptions?.find(
-    (item) => !linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId
-  );
-  const filePath = linkedUser?.gitFilePath || sourceSubscription?.filePath || exclusion?.gitFilePath;
+  const filePath = exclusion?.gitFilePath || linkedUser?.gitFilePath;
   if (!filePath) {
     return res.status(404).send('Файл подписки не привязан к репозиторию');
   }
@@ -11761,8 +11708,15 @@ app.get('/api/happ-sub/:token', async (req, res) => {
       item.filePath === filePath &&
       (!linkedUser.subscriptionSourceId || item.sourceId === linkedUser.subscriptionSourceId)
   );
-  const sourceId = linkedUser?.subscriptionSourceId || matchingSubscription?.sourceId ||
-    store.repoFiles?.find((item) => item.filePath === filePath)?.sourceId;
+  const repoFile = store.repoFiles?.find((item) =>
+    item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
+    (exclusion
+      ? item.userId === `excl_${token}` || item.userId === exclusion.userId || !item.userId
+      : (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
+        (!linkedUser || !item.userId || item.userId === linkedUser.id || item.userId === `excl_${token}`))
+  );
+  const sourceId = matchingSubscription?.sourceId || repoFile?.sourceId ||
+    (exclusion ? undefined : linkedUser?.subscriptionSourceId);
   const source = sourceId
     ? store.gitSources?.find((item) => item.id === sourceId)
     : getActiveGitSource();
@@ -11770,47 +11724,15 @@ app.get('/api/happ-sub/:token', async (req, res) => {
     return res.status(404).send('Git-источник файла подписки не найден');
   }
 
-  const repoFile = store.repoFiles?.find(
-    (item) =>
-      item.sourceId === source.id &&
-      item.filePath.replace(/^\/+/, '') === filePath.replace(/^\/+/, '') &&
-      (!linkedUser || !item.telegramId || item.telegramId === linkedUser.telegramId) &&
-      (!linkedUser || !item.userId || item.userId === linkedUser.id || item.userId === `excl_${token}`)
-  );
-  const cachedRawUrl = gitFileMetadataCache.get(filePath.replace(/^\/+/, ''))?.rawUrl;
-  const candidates = [
-    repoFile?.rawUrl,
-    matchingSubscription?.rawUrl,
-    linkedUser?.gitRawUrl,
-    exclusion?.gitRawUrl,
-    cachedRawUrl,
-    buildGitRawUrl(source, filePath),
-  ];
-  const rawUrl = candidates.find((candidate): candidate is string => {
-    if (!candidate || !isRepositoryRawUrl(source, candidate, filePath)) return false;
-    try {
-      return new URL(candidate).protocol === 'https:';
-    } catch {
-      return false;
-    }
-  });
-  if (!rawUrl) {
-    return res.status(502).send(`Не удалось определить актуальный RAW-адрес файла в ${source.name}`);
-  }
-
   try {
-    const response = await fetch(rawUrl, { signal: AbortSignal.timeout(20000) });
-    if (!response.ok) {
-      return res.status(502).send(`Невозможно получить актуальный файл подписки из ${source.name}`);
-    }
-    const content = await response.text();
+    const content = await readCurrentRepositoryFile(source, filePath);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     return res.send(content);
   } catch (err: any) {
-    console.error(`[HAPP subscription proxy] Failed to fetch ${rawUrl}:`, err.message);
+    console.error(`[HAPP subscription proxy] Failed to read ${source.name}/${filePath}:`, err.message);
     return res.status(502).send(`Не удалось загрузить актуальную подписку из ${source.name}`);
   }
 });
