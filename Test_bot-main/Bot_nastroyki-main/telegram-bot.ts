@@ -59,6 +59,13 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function isValidTelegramChatId(chatId: unknown): chatId is number | string {
+  return (
+    (typeof chatId === 'string' && chatId.trim() !== '') ||
+    (typeof chatId === 'number' && Number.isFinite(chatId) && chatId !== 0)
+  );
+}
+
 function formatIssueTime(bot: any): { time: string; tz: string } {
   const tz = bot.timeZone && bot.timeZone !== 'device' ? bot.timeZone : 'Europe/Moscow';
   try {
@@ -409,13 +416,7 @@ export class TelegramBotManager {
   }
 
   public async tgApi(token: string, method: string, body?: any, signal?: AbortSignal): Promise<any> {
-    if (
-      telegramMethodsRequiringChatId.has(method) &&
-      !(
-        (typeof body?.chat_id === 'string' && body.chat_id.trim() !== '') ||
-        (typeof body?.chat_id === 'number' && Number.isFinite(body.chat_id) && body.chat_id !== 0)
-      )
-    ) {
+    if (telegramMethodsRequiringChatId.has(method) && !isValidTelegramChatId(body?.chat_id)) {
       const bot = this.options.getBots().find((item: any) => item.token === token);
       const callSites = new Error().stack
         ?.split('\n')
@@ -1140,7 +1141,25 @@ export class TelegramBotManager {
 
   private async handleMessage(bot: any, msg: any) {
     if (!msg || !msg.from) return;
-    const chatId = msg.chat.id;
+    const incomingChatId = msg.chat?.id;
+    const chatId = isValidTelegramChatId(incomingChatId) ? incomingChatId : msg.from.id;
+    if (!isValidTelegramChatId(chatId)) {
+      this.addBotLog(
+        'error',
+        'invalid_message_chat_id',
+        `Входящее сообщение не содержит корректный chat_id; отправитель также не имеет допустимого Telegram ID.`,
+        bot
+      );
+      return;
+    }
+    if (!isValidTelegramChatId(incomingChatId)) {
+      this.addBotLog(
+        'warning',
+        'message_chat_id_fallback',
+        `У входящего сообщения отсутствует chat_id; для ответа использован Telegram ID отправителя (${msg.chat?.type || 'тип чата неизвестен'}).`,
+        bot
+      );
+    }
     const text = (msg.text || '').trim();
     const user = this.findOrCreateUser(msg.from, bot);
     const store = this.options.getStore();
