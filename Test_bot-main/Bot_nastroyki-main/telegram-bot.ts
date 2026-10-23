@@ -109,6 +109,10 @@ export class TelegramBotManager {
   public async start() {
     this.isShuttingDown = false;
     const bots = this.options.getBots();
+    const enabledBots = bots.filter((bot) => bot.enabled && bot.token?.trim());
+    if (enabledBots.length === 0) {
+      this.addBotLog('error', 'polling_not_started', 'Нет включённых ботов с токеном; long polling не запущен.');
+    }
     for (const bot of bots) {
       if (bot.enabled && bot.token && bot.token.trim()) {
         this.startBotPolling(bot);
@@ -616,6 +620,43 @@ export class TelegramBotManager {
       return;
     }
 
+    const webhookInfo = await this.getBotWebhookInfo(bot.token);
+    const webhookUrl = webhookInfo?.ok ? webhookInfo.result?.url : '';
+    if (webhookUrl) {
+      let webhookHost = '';
+      try {
+        webhookHost = new URL(webhookUrl).host;
+      } catch {
+        webhookHost = 'неизвестный адрес';
+      }
+
+      const deleteResult = await this.deleteBotWebhook(bot.token, false);
+      if (!deleteResult?.ok) {
+        const message = `Не удалось удалить активный webhook (${webhookHost}); long polling может не получать команды. ${deleteResult?.description || ''}`.trim();
+        bot.status = 'error';
+        bot.errorMessage = message;
+        this.options.saveStore();
+        this.addBotLog('error', 'webhook_cleanup_failed', message, bot);
+        console.warn(`[Telegram Bot] ${message}`);
+        return;
+      }
+
+      this.addBotLog(
+        'warning',
+        'webhook_removed',
+        `Удалён активный webhook (${webhookHost}), чтобы включить Render long polling. Ожидающие обновления сохранены.`,
+        bot
+      );
+      console.warn(`[Telegram Bot] Removed active webhook (${webhookHost}) before starting long polling.`);
+    } else if (!webhookInfo?.ok) {
+      this.addBotLog(
+        'warning',
+        'webhook_status_unavailable',
+        `Не удалось проверить активный webhook перед запуском polling: ${webhookInfo?.description || 'нет ответа Telegram API'}`,
+        bot
+      );
+    }
+
     // Long-polling loop
     (async () => {
       let offset = 0;
@@ -641,9 +682,33 @@ export class TelegramBotManager {
               await this.processUpdate(bot, update);
             }
           } else if (updates && updates.error_code === 409) {
-            // Another instance (e.g. Render production container) is running getUpdates
-            this.addBotLog('warning', 'polling_conflict', 'Telegram сообщает, что другой процесс уже получает обновления.', bot);
-            console.log(`[Telegram Bot] ℹ️ 409 Conflict: Another instance is actively polling @${bot.username}. Backing off for 25s so primary instance has uninterrupted priority.`);
+            const description = String(updates.description || 'Telegram вернул 409 Conflict.');
+            if (/webhook/i.test(description)) {
+              const webhookInfo = await this.getBotWebhookInfo(bot.token);
+              let webhookHost = '';
+              if (webhookInfo?.ok && webhookInfo.result?.url) {
+                try {
+                  webhookHost = ` Хост webhook: ${new URL(webhookInfo.result.url).host}.`;
+                } catch {
+                  webhookHost = '';
+                }
+              }
+              this.addBotLog(
+                'error',
+                'webhook_conflict',
+                `Polling остановлен конфликтом с webhook. ${description}${webhookHost} Удалите webhook, если бот должен работать через Render polling.`,
+                bot
+              );
+              console.warn(`[Telegram Bot] Polling conflict for @${bot.username}: webhook is active. ${description}`);
+            } else {
+              this.addBotLog(
+                'warning',
+                'polling_conflict',
+                `Telegram сообщает о другом getUpdates-процессе: ${description}`,
+                bot
+              );
+              console.log(`[Telegram Bot] ℹ️ 409 Conflict for @${bot.username}: ${description}`);
+            }
             await new Promise((r) => setTimeout(r, 25000));
           } else if (updates && !updates.ok) {
             this.addBotLog('warning', 'getUpdates', `Telegram API ${updates.error_code ?? 'unknown'}: ${updates.description || 'Неизвестная ошибка'}`, bot);
