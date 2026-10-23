@@ -1,5 +1,18 @@
 // Using Node.js native global fetch for reliability across container environments (Render/Docker/Node 18+)
 const tgFetch = globalThis.fetch;
+const telegramMethodsRequiringChatId = new Set([
+  'sendMessage',
+  'sendPhoto',
+  'sendVideo',
+  'sendDocument',
+  'sendAnimation',
+  'sendAudio',
+  'sendVoice',
+  'sendLocation',
+  'sendContact',
+  'sendPoll',
+  'sendSticker',
+]);
 
 import {
   CANONICAL_BOT_TEMPLATES,
@@ -383,6 +396,21 @@ export class TelegramBotManager {
   }
 
   public async tgApi(token: string, method: string, body?: any, signal?: AbortSignal): Promise<any> {
+    if (
+      telegramMethodsRequiringChatId.has(method) &&
+      (body?.chat_id == null || String(body.chat_id).trim() === '')
+    ) {
+      const bot = this.options.getBots().find((item: any) => item.token === token);
+      const callSite = new Error().stack
+        ?.split('\n')
+        .map((line) => line.trim())
+        .find((line) => line && !line.includes('TelegramBotManager.tgApi'));
+      const message = `${method} вызван без chat_id.${callSite ? ` Источник: ${callSite}` : ''}`;
+      this.addBotLog('error', 'invalid_chat_id', message, bot);
+      console.warn(`[Telegram Bot API] ${message}`);
+      return { ok: false, error_code: 400, description: 'Bad Request: chat_id is empty' };
+    }
+
     try {
       const res = await tgFetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: 'POST',
