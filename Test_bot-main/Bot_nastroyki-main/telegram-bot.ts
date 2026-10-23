@@ -40,6 +40,7 @@ interface ActivePollingBot {
   token: string;
   abortController: AbortController;
   pollingPromise?: Promise<void>;
+  status: 'connecting' | 'polling';
 }
 
 export interface TelegramBotLogEntry {
@@ -89,6 +90,17 @@ export class TelegramBotManager {
     return this.botLogs.slice(-Math.max(1, Math.min(limit, 1000))).reverse();
   }
 
+  public getPollingStatuses(): Array<{ bot: string; enabled: boolean; status: 'connecting' | 'polling' | 'stopped' }> {
+    return this.options.getBots().map((bot: any) => {
+      const active = this.activeBots.get(bot.id);
+      return {
+        bot: bot.username ? `@${bot.username}` : bot.name || bot.id,
+        enabled: Boolean(bot.enabled && bot.token?.trim()),
+        status: active?.status || 'stopped',
+      };
+    });
+  }
+
   public clearBotLogs(): void {
     this.botLogs = [];
     this.addBotLog('info', 'system', 'Журнал Telegram-бота очищен.');
@@ -128,12 +140,9 @@ export class TelegramBotManager {
   }
 
   public async reload() {
-    // Stop all running pollings
-    for (const [id, active] of this.activeBots.entries()) {
-      try {
-        active.abortController.abort();
-      } catch {}
-    }
+    const activeBots = [...this.activeBots.values()];
+    for (const active of activeBots) active.abortController.abort();
+    await Promise.all(activeBots.map((active) => active.pollingPromise).filter(Boolean));
     this.activeBots.clear();
     await this.start();
   }
@@ -402,14 +411,23 @@ export class TelegramBotManager {
   public async tgApi(token: string, method: string, body?: any, signal?: AbortSignal): Promise<any> {
     if (
       telegramMethodsRequiringChatId.has(method) &&
-      (body?.chat_id == null || String(body.chat_id).trim() === '')
+      !(
+        (typeof body?.chat_id === 'string' && body.chat_id.trim() !== '') ||
+        (typeof body?.chat_id === 'number' && Number.isFinite(body.chat_id) && body.chat_id !== 0)
+      )
     ) {
       const bot = this.options.getBots().find((item: any) => item.token === token);
-      const callSite = new Error().stack
+      const callSites = new Error().stack
         ?.split('\n')
         .map((line) => line.trim())
-        .find((line) => line && !line.includes('TelegramBotManager.tgApi'));
-      const message = `${method} вызван без chat_id.${callSite ? ` Источник: ${callSite}` : ''}`;
+        .filter((line) =>
+          line.startsWith('at ') &&
+          !line.includes('TelegramBotManager.tgApi') &&
+          !line.includes('node:internal') &&
+          !line.includes('processTicksAndRejections')
+        )
+        .slice(0, 3);
+      const message = `${method} вызван с пустым или некорректным chat_id.${callSites?.length ? ` Источник: ${callSites.join(' <- ')}` : ''}`;
       this.addBotLog('error', 'invalid_chat_id', message, bot);
       console.warn(`[Telegram Bot API] ${message}`);
       return { ok: false, error_code: 400, description: 'Bad Request: chat_id is empty' };
@@ -587,15 +605,21 @@ export class TelegramBotManager {
 
     this.addBotLog('info', 'polling_starting', 'Проверка подключения и запуск long polling.', bot);
     const abortController = new AbortController();
-    this.activeBots.set(bot.id, {
+    const activeBot: ActivePollingBot = {
       id: bot.id,
       token: bot.token,
       abortController,
-    });
+      status: 'connecting',
+    };
+    this.activeBots.set(bot.id, activeBot);
 
     // Test bot token & retrieve username
     try {
       const me = await this.tgApi(bot.token, 'getMe', undefined, abortController.signal);
+      if (abortController.signal.aborted || this.isShuttingDown) {
+        if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
+        return;
+      }
       if (me && me.ok && me.result) {
         bot.status = 'connected';
         bot.username = me.result.username || bot.username;
@@ -610,17 +634,29 @@ export class TelegramBotManager {
         this.options.saveStore();
         this.addBotLog('error', 'connection_failed', bot.errorMessage, bot);
         console.warn(`[Telegram Bot] Failed to connect bot ${bot.name}:`, bot.errorMessage);
+        if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
         return;
       }
     } catch (err: any) {
+      if (abortController.signal.aborted || this.isShuttingDown) return;
       bot.status = 'error';
       bot.errorMessage = err.message || 'Ошибка подключения к Telegram API';
       this.options.saveStore();
       this.addBotLog('error', 'connection_failed', bot.errorMessage, bot);
+      if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
+      return;
+    }
+
+    if (abortController.signal.aborted || this.isShuttingDown) {
+      if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
       return;
     }
 
     const webhookInfo = await this.getBotWebhookInfo(bot.token);
+    if (abortController.signal.aborted || this.isShuttingDown) {
+      if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
+      return;
+    }
     const webhookUrl = webhookInfo?.ok ? webhookInfo.result?.url : '';
     if (webhookUrl) {
       let webhookHost = '';
@@ -638,6 +674,7 @@ export class TelegramBotManager {
         this.options.saveStore();
         this.addBotLog('error', 'webhook_cleanup_failed', message, bot);
         console.warn(`[Telegram Bot] ${message}`);
+        if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
         return;
       }
 
@@ -657,8 +694,14 @@ export class TelegramBotManager {
       );
     }
 
+    if (abortController.signal.aborted || this.isShuttingDown) {
+      if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
+      return;
+    }
+
     // Long-polling loop
-    (async () => {
+    activeBot.status = 'polling';
+    activeBot.pollingPromise = (async () => {
       let offset = 0;
       this.addBotLog('info', 'polling_started', 'Получение обновлений Telegram запущено.', bot);
       console.log(`[Telegram Bot] Polling started for @${bot.username}...`);
@@ -728,6 +771,7 @@ export class TelegramBotManager {
       }
       this.addBotLog('info', 'polling_stopped', 'Получение обновлений Telegram остановлено.', bot);
       console.log(`[Telegram Bot] Polling stopped for @${bot.username}`);
+      if (this.activeBots.get(bot.id) === activeBot) this.activeBots.delete(bot.id);
     })();
   }
 

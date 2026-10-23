@@ -9,6 +9,7 @@ export const TelegramBotLogView: React.FC = () => {
   const [logs, setLogs] = useState<TelegramBotLogEntry[]>([]);
   const [pollingEnabled, setPollingEnabled] = useState<boolean | null>(null);
   const [enabledBots, setEnabledBots] = useState(0);
+  const [pollingStatuses, setPollingStatuses] = useState<Array<{ bot: string; enabled: boolean; status: 'connecting' | 'polling' | 'stopped' }>>([]);
   const [level, setLevel] = useState<LogLevelFilter>('all');
   const [search, setSearch] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -22,6 +23,7 @@ export const TelegramBotLogView: React.FC = () => {
       setLogs(result.logs);
       setPollingEnabled(result.pollingEnabled);
       setEnabledBots(result.enabledBots);
+      setPollingStatuses(result.pollingStatuses || []);
       setError('');
     } catch (err: any) {
       setError(err.message || 'Не удалось загрузить журнал бота.');
@@ -111,6 +113,24 @@ export const TelegramBotLogView: React.FC = () => {
           <span className="rounded-full bg-stone-100 px-3 py-1 font-semibold text-stone-700">Включённых ботов: {enabledBots}</span>
           <span className="rounded-full bg-stone-100 px-3 py-1 font-semibold text-stone-700">Записей: {logs.length}</span>
         </div>
+        {pollingStatuses.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {pollingStatuses.map((item) => (
+              <span
+                key={item.bot}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                  item.status === 'polling'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : item.status === 'connecting'
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : 'border-stone-200 bg-stone-50 text-stone-600'
+                }`}
+              >
+                {item.bot}: {item.status === 'polling' ? 'получает обновления' : item.status === 'connecting' ? 'подключается' : item.enabled ? 'не запущен' : 'выключен'}
+              </span>
+            ))}
+          </div>
+        )}
         {pollingEnabled === false && (
           <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             Получение команд отключено переменной ENABLE_TELEGRAM_POLLING=false.

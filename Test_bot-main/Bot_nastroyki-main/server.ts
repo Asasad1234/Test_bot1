@@ -10291,6 +10291,7 @@ app.get('/api/bot-logs', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 300, 1000);
   res.json({
     logs: botManager.getBotLogs(limit),
+    pollingStatuses: botManager.getPollingStatuses(),
     pollingEnabled: process.env.ENABLE_TELEGRAM_POLLING !== 'false',
     enabledBots: (store.bots || []).filter((bot) => bot.enabled && Boolean(bot.token?.trim())).length,
   });

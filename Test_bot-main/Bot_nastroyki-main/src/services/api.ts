@@ -1150,6 +1150,7 @@ export async function fetchTelegramBotLogs(limit = 300): Promise<{
   logs: TelegramBotLogEntry[];
   pollingEnabled: boolean;
   enabledBots: number;
+  pollingStatuses: Array<{ bot: string; enabled: boolean; status: 'connecting' | 'polling' | 'stopped' }>;
 }> {
   const res = await fetch(`${API_BASE}/bot-logs?limit=${limit}`);
   const data = await res.json();
