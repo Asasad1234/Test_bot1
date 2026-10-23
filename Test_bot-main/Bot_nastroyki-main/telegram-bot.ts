@@ -29,6 +29,15 @@ interface ActivePollingBot {
   pollingPromise?: Promise<void>;
 }
 
+export interface TelegramBotLogEntry {
+  id: string;
+  timestamp: string;
+  level: 'info' | 'warning' | 'error';
+  bot: string;
+  event: string;
+  message: string;
+}
+
 function escapeHtml(text: string): string {
   return (text || '')
     .replace(/&/g, '&amp;')
@@ -54,12 +63,34 @@ function formatIssueTime(bot: any): { time: string; tz: string } {
 
 export class TelegramBotManager {
   private activeBots: Map<string, ActivePollingBot> = new Map();
+  private botLogs: TelegramBotLogEntry[] = [];
   private options: TelegramBotManagerOptions;
   private isShuttingDown = false;
   private periodicInterval: any = null;
 
   constructor(options: TelegramBotManagerOptions) {
     this.options = options;
+  }
+
+  public getBotLogs(limit = 300): TelegramBotLogEntry[] {
+    return this.botLogs.slice(-Math.max(1, Math.min(limit, 1000))).reverse();
+  }
+
+  public clearBotLogs(): void {
+    this.botLogs = [];
+    this.addBotLog('info', 'system', 'Журнал Telegram-бота очищен.');
+  }
+
+  private addBotLog(level: TelegramBotLogEntry['level'], event: string, message: string, bot?: any): void {
+    this.botLogs.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      level,
+      bot: bot?.username ? `@${bot.username}` : bot?.name || 'Система',
+      event,
+      message,
+    });
+    if (this.botLogs.length > 500) this.botLogs.splice(0, this.botLogs.length - 500);
   }
 
   public async start() {
@@ -361,6 +392,13 @@ export class TelegramBotManager {
       });
       const data: any = await res.json();
 
+      if (data && !data.ok && !(method === 'getUpdates' && data.error_code === 409)) {
+        this.addBotLog('warning', method, `Telegram API ${data.error_code ?? res.status}: ${data.description || res.statusText}`);
+        console.warn(
+          `[Telegram Bot API] ${method} failed (${data.error_code ?? res.status}): ${data.description || res.statusText}`
+        );
+      }
+
       // Check if user blocked the bot
       if (data && !data.ok && data.error_code === 403 && data.description?.includes('bot was blocked')) {
         const targetChatId = body?.chat_id;
@@ -372,6 +410,7 @@ export class TelegramBotManager {
       return data;
     } catch (err: any) {
       if (err.name === 'AbortError') return null;
+      this.addBotLog('error', method, err.message || 'Ошибка сетевого запроса к Telegram API');
       console.warn(`[TG Bot API Error] ${method}:`, err.message);
       return null;
     }
@@ -514,6 +553,7 @@ export class TelegramBotManager {
   private async startBotPolling(bot: any) {
     if (this.activeBots.has(bot.id)) return;
 
+    this.addBotLog('info', 'polling_starting', 'Проверка подключения и запуск long polling.', bot);
     const abortController = new AbortController();
     this.activeBots.set(bot.id, {
       id: bot.id,
@@ -530,11 +570,13 @@ export class TelegramBotManager {
         bot.botId = String(me.result.id);
         bot.errorMessage = undefined;
         this.options.saveStore();
+        this.addBotLog('info', 'connected', 'Подключение к Telegram API успешно.', bot);
         console.log(`[Telegram Bot] Successfully connected @${bot.username} (ID: ${bot.botId})`);
       } else {
         bot.status = 'error';
         bot.errorMessage = me?.description || 'Неверный токен Telegram бота';
         this.options.saveStore();
+        this.addBotLog('error', 'connection_failed', bot.errorMessage, bot);
         console.warn(`[Telegram Bot] Failed to connect bot ${bot.name}:`, bot.errorMessage);
         return;
       }
@@ -542,12 +584,14 @@ export class TelegramBotManager {
       bot.status = 'error';
       bot.errorMessage = err.message || 'Ошибка подключения к Telegram API';
       this.options.saveStore();
+      this.addBotLog('error', 'connection_failed', bot.errorMessage, bot);
       return;
     }
 
     // Long-polling loop
     (async () => {
       let offset = 0;
+      this.addBotLog('info', 'polling_started', 'Получение обновлений Telegram запущено.', bot);
       console.log(`[Telegram Bot] Polling started for @${bot.username}...`);
 
       while (!abortController.signal.aborted && !this.isShuttingDown) {
@@ -570,17 +614,26 @@ export class TelegramBotManager {
             }
           } else if (updates && updates.error_code === 409) {
             // Another instance (e.g. Render production container) is running getUpdates
+            this.addBotLog('warning', 'polling_conflict', 'Telegram сообщает, что другой процесс уже получает обновления.', bot);
             console.log(`[Telegram Bot] ℹ️ 409 Conflict: Another instance is actively polling @${bot.username}. Backing off for 25s so primary instance has uninterrupted priority.`);
             await new Promise((r) => setTimeout(r, 25000));
+          } else if (updates && !updates.ok) {
+            this.addBotLog('warning', 'getUpdates', `Telegram API ${updates.error_code ?? 'unknown'}: ${updates.description || 'Неизвестная ошибка'}`, bot);
+            console.warn(
+              `[Telegram Bot] getUpdates failed for @${bot.username} (${updates.error_code ?? 'unknown'}): ${updates.description || 'Unknown Telegram API error'}`
+            );
+            await new Promise((r) => setTimeout(r, 3000));
           } else {
             await new Promise((r) => setTimeout(r, 1500));
           }
         } catch (err: any) {
           if (abortController.signal.aborted || this.isShuttingDown) break;
+          this.addBotLog('error', 'polling_error', err.message || 'Ошибка long polling.', bot);
           console.warn(`[Telegram Bot] Polling tick error for @${bot.username}:`, err.message);
           await new Promise((r) => setTimeout(r, 3000));
         }
       }
+      this.addBotLog('info', 'polling_stopped', 'Получение обновлений Telegram остановлено.', bot);
       console.log(`[Telegram Bot] Polling stopped for @${bot.username}`);
     })();
   }
@@ -594,11 +647,19 @@ export class TelegramBotManager {
       } else if (update.chat_member) {
         await this.handleChatMemberUpdate(bot, update.chat_member);
       } else if (update.message) {
+        if (typeof update.message.text === 'string' && update.message.text.trim().startsWith('/')) {
+          const command = update.message.text.trim().split(/\s+/, 1)[0];
+          this.addBotLog('info', 'command_received', `Получена команда ${command}.`, bot);
+          console.log(`[Telegram Bot] Received ${command} for @${bot.username || bot.name}`);
+        }
         await this.handleMessage(bot, update.message);
       } else if (update.callback_query) {
+        this.addBotLog('info', 'callback_received', 'Получено нажатие кнопки в сообщении бота.', bot);
+        console.log(`[Telegram Bot] Received callback for @${bot.username || bot.name}`);
         await this.handleCallbackQuery(bot, update.callback_query);
       }
     } catch (err: any) {
+      this.addBotLog('error', 'update_processing_error', err.message || 'Ошибка обработки обновления.', bot);
       console.warn(`[TelegramBotManager] processUpdate error for @${bot.username || bot.name}:`, err.message);
     }
   }

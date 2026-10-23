@@ -17,6 +17,7 @@ import { SubscriptionsView } from './components/SubscriptionsView';
 import { FeedbackView } from './components/FeedbackView';
 import { KeyProcessorView } from './components/KeyProcessorView';
 import { SyncLogView } from './components/SyncLogView';
+import { TelegramBotLogView } from './components/TelegramBotLogView';
 import { 
   SystemStatus, 
   GitSourceItem, 
@@ -584,6 +585,8 @@ export default function App() {
             onNavigateToDashboard={() => setCurrentTab('dashboard')}
           />
         )}
+
+        {currentTab === 'bot-logs' && <TelegramBotLogView />}
 
         {currentTab === 'settings' && (
           <SettingsView

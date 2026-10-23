@@ -14,6 +14,7 @@ import {
   DockerConfig,
   SyncHealthReport,
   SystemLogEntry,
+  TelegramBotLogEntry,
   DeepAuditResult,
   HappCryptVersion
 } from '../types';
@@ -1145,6 +1146,24 @@ export async function deepAuditAndForceSync(): Promise<{
 }
 
 // Realtime System Logs
+export async function fetchTelegramBotLogs(limit = 300): Promise<{
+  logs: TelegramBotLogEntry[];
+  pollingEnabled: boolean;
+  enabledBots: number;
+}> {
+  const res = await fetch(`${API_BASE}/bot-logs?limit=${limit}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'Ошибка загрузки журнала Telegram-бота');
+  return data;
+}
+
+export async function clearTelegramBotLogs(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/bot-logs`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'Ошибка очистки журнала Telegram-бота');
+  return data;
+}
+
 export async function fetchSystemLogs(params?: {
   category?: string;
   level?: string;

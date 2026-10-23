@@ -10287,6 +10287,20 @@ app.post('/api/sync/deep-audit-force', async (req, res) => {
 });
 
 // Logs API Endpoints
+app.get('/api/bot-logs', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 300, 1000);
+  res.json({
+    logs: botManager.getBotLogs(limit),
+    pollingEnabled: process.env.ENABLE_TELEGRAM_POLLING !== 'false',
+    enabledBots: (store.bots || []).filter((bot) => bot.enabled && Boolean(bot.token?.trim())).length,
+  });
+});
+
+app.delete('/api/bot-logs', (_req, res) => {
+  botManager.clearBotLogs();
+  res.json({ success: true, message: 'Журнал Telegram-бота очищен.' });
+});
+
 app.get('/api/logs', (req, res) => {
   const { category, level, limit, search } = req.query;
   let filtered = [...systemLogs];
@@ -13193,9 +13207,12 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Puls-dostupa server running on port ${PORT}`);
     if (process.env.ENABLE_TELEGRAM_POLLING !== 'false') {
+      console.log('[Telegram Bot Manager] Long polling is enabled; starting configured bots.');
       botManager.start().catch((err) => {
         console.warn('[Telegram Bot Manager] Startup error:', err);
       });
+    } else {
+      console.warn('[Telegram Bot Manager] Long polling is disabled by ENABLE_TELEGRAM_POLLING=false.');
     }
     // Start continuous high-frequency central subscription monitoring & propagation (default 1-2 seconds, configurable)
     let lastCentralCheck = 0;

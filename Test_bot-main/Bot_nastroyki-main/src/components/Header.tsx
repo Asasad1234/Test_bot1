@@ -15,7 +15,8 @@ import {
   MessageSquare,
   Zap,
   Download,
-  Terminal
+  Terminal,
+  Bot
 } from 'lucide-react';
 import { SystemStatus } from '../types';
 
@@ -45,6 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'bot-sim', label: 'Воронка и Бот', icon: Sparkles },
     { id: 'templates', label: '3 Источника и Блокировки', icon: ShieldAlert },
     { id: 'logs', label: 'Журнал процессов', icon: Terminal },
+    { id: 'bot-logs', label: 'Логи Telegram-бота', icon: Bot },
     { id: 'settings', label: 'Источники и Боты', icon: Settings },
   ];
 

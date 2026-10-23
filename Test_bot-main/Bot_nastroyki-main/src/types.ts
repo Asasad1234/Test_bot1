@@ -534,6 +534,15 @@ export interface SystemLogEntry {
   details?: any;
 }
 
+export interface TelegramBotLogEntry {
+  id: string;
+  timestamp: string;
+  level: 'info' | 'warning' | 'error';
+  bot: string;
+  event: string;
+  message: string;
+}
+
 export interface DeepAuditResult {
   durationMs: number;
   remoteCentralPulled: boolean;
