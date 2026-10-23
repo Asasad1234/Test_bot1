@@ -2144,7 +2144,7 @@ export class TelegramBotManager {
         console.warn(`[Telegram Bot] Welcome media request failed for ${bot.id}:`, err.message);
       }
     }
-    return this.tgApi(bot.token, 'sendMessage', message);
+    return this.tgApi(bot.token, 'sendMessage', { ...message, chat_id: chatId });
   }
 
   private async sendMainMenu(bot: any, chatId: number | string, user: any) {
