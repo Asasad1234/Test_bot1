@@ -65,8 +65,11 @@ interface ExclusionsViewProps {
   onRefreshExclusions?: () => Promise<void>;
 }
 
-function getClckShortUrl(url?: string): string {
-  return url && /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(url) ? url : '';
+function getIncyDisplayUrl(url?: string): string {
+  return url && (
+    /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(url) ||
+    /^https:\/\/(?:sourcecraft\.dev\/|raw\.sourcecraft\.tech\/)/i.test(url)
+  ) ? url : '';
 }
 
 export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
@@ -79,6 +82,8 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
   onSyncAllExclusions,
   onRefreshExclusions,
 }) => {
+  const isSourceCraft = activeGitSource?.provider === 'sourcecraft';
+
   // Navigation Sub-Tabs (3 sub-items: Channel, Team, Temporary Test Links)
   const [activeSubTab, setActiveSubTab] = useState<'channel' | 'team' | 'temporary'>('channel');
 
@@ -195,7 +200,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
 
   const handleCopy = (text: string, key: string) => {
     if (!text) {
-      alert('Короткая ссылка clck.ru пока не создана. Нажмите кнопку обновления clck.');
+      alert('Ссылка на файл подписки пока не сформирована. Нажмите кнопку обновления ссылки.');
       return;
     }
     navigator.clipboard.writeText(text);
@@ -417,7 +422,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
       return;
     }
 
-    const incyUrl = getClckShortUrl(qrModalExcl.clckUrl);
+    const incyUrl = getIncyDisplayUrl(qrModalExcl.clckUrl);
     const happUrl = qrModalExcl.happUrl || '';
     const targetUrl = qrFormat === 'happ' ? happUrl : incyUrl;
     if (!targetUrl) {
@@ -906,7 +911,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                 const directSubUrl = `${window.location.origin}/api/sub/${excl.token}`;
                 const rawUrl = excl.gitRawUrl || directSubUrl;
                 const happUrl = excl.happUrl || '';
-                const incyUrl = getClckShortUrl(excl.clckUrl);
+                const incyUrl = getIncyDisplayUrl(excl.clckUrl);
                 const filePathDisplay = excl.gitFilePath || `subs/${excl.token}.txt`;
                 const isSubscribed = excl.channelMembership !== 'left';
                 const hasDevice = Boolean(excl.boundDevice);
@@ -1181,7 +1186,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                           <div className="flex items-center justify-between text-[11px] font-bold text-emerald-950 mb-1">
                             <span className="flex items-center space-x-1">
                               <GitBranch className="h-3.5 w-3.5 text-emerald-600" />
-                              <span>INCY / VLESS (clck.ru) - 1 устр.:</span>
+                              <span>{isSourceCraft ? 'INCY / VLESS (прямая ссылка SourceCraft) - 1 устр.:' : 'INCY / VLESS (clck.ru) - 1 устр.:'}</span>
                             </span>
                             <div className="flex items-center space-x-1">
                               <button
@@ -1189,9 +1194,10 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                                 onClick={() => handleRefreshClck(excl.id)}
                                 disabled={shorteningId === excl.id}
                                 className="px-2 py-0.5 rounded bg-white border border-emerald-300 text-emerald-900 hover:bg-emerald-100 flex items-center space-x-1 cursor-pointer text-[10px]"
+                                title="Обновить ссылку подписки"
                               >
                                 <RefreshCw className={`h-2.5 w-2.5 ${shorteningId === excl.id ? 'animate-spin' : ''}`} />
-                                <span>clck</span>
+                                <span>{isSourceCraft ? 'ссылка' : 'clck'}</span>
                               </button>
                               <button
                                 type="button"
@@ -1345,7 +1351,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                 const directSubUrl = `${window.location.origin}/api/sub/${excl.token}`;
                 const rawUrl = excl.gitRawUrl || directSubUrl;
                 const happUrl = excl.happUrl || '';
-                const incyUrl = getClckShortUrl(excl.clckUrl);
+                const incyUrl = getIncyDisplayUrl(excl.clckUrl);
                 const filePathDisplay = excl.gitFilePath || `subs/${excl.token}.txt`;
                 const customLines = (excl.customContent || (excl.customNodes && excl.customNodes.join('\n')) || '').trim();
                 const customKeysCount = customLines ? customLines.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length : 0;
@@ -1459,7 +1465,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                           <div className="flex items-center justify-between text-[11px] font-bold text-emerald-900 mb-1">
                             <span className="flex items-center space-x-1.5">
                               <GitBranch className="h-3.5 w-3.5 text-emerald-600" />
-                              <span>Формат INCY / VLESS (Зашифровано clck.ru):</span>
+                              <span>{isSourceCraft ? 'Формат INCY / VLESS (прямая ссылка SourceCraft):' : 'Формат INCY / VLESS (clck.ru):'}</span>
                             </span>
                             <div className="flex items-center space-x-1.5">
                               <button
@@ -1467,10 +1473,10 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                                 onClick={() => handleRefreshClck(excl.id)}
                                 disabled={shorteningId === excl.id}
                                 className="px-2 py-0.5 rounded-md bg-white border border-emerald-300 text-emerald-900 hover:bg-emerald-100 flex items-center space-x-1 cursor-pointer"
-                                title="Пересоздать ссылку clck.ru"
+                                title="Обновить ссылку подписки"
                               >
                                 <RefreshCw className={`h-3 w-3 ${shorteningId === excl.id ? 'animate-spin text-emerald-600' : 'text-emerald-700'}`} />
-                                <span className="text-[10px]">{shorteningId === excl.id ? '...' : 'Обновить clck'}</span>
+                                <span className="text-[10px]">{shorteningId === excl.id ? '...' : isSourceCraft ? 'Обновить ссылку' : 'Обновить clck'}</span>
                               </button>
 
                               <button
@@ -1675,7 +1681,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                 const timeInfo = formatRemainingTime(excl.expiresAt);
                 const directSubUrl = `${window.location.origin}/api/sub/${excl.token}`;
                 const rawUrl = excl.gitRawUrl || directSubUrl;
-                const incyUrl = getClckShortUrl(excl.clckUrl);
+                const incyUrl = getIncyDisplayUrl(excl.clckUrl);
                 const happUrl = excl.happUrl || '';
                 const customLines = (excl.customContent || (excl.customNodes && excl.customNodes.join('\n')) || '').trim();
                 const customKeysCount = customLines ? customLines.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length : 0;
@@ -1788,7 +1794,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                               onClick={() => handleRefreshClck(excl.id)}
                               disabled={shorteningId === excl.id}
                               className="p-1 hover:bg-stone-200 rounded-lg text-stone-600 cursor-pointer"
-                              title="Обновить сокращение clck.ru"
+                              title="Обновить ссылку подписки"
                             >
                               <RefreshCw className={`h-3.5 w-3.5 ${shorteningId === excl.id ? 'animate-spin text-emerald-600' : ''}`} />
                             </button>
@@ -1796,7 +1802,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                               type="button"
                               onClick={() => handleCopy(incyUrl, `temp_incy_${excl.id}`)}
                               className="p-1 hover:bg-stone-200 rounded-lg text-stone-600 cursor-pointer"
-                              title="Скопировать ссылку для INCY (clck.ru)"
+                              title={isSourceCraft ? 'Скопировать прямую ссылку SourceCraft для INCY' : 'Скопировать ссылку для INCY (clck.ru)'}
                             >
                               {copiedKey === `temp_incy_${excl.id}` ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
                             </button>
@@ -1992,7 +1998,7 @@ export const ExclusionsView: React.FC<ExclusionsViewProps> = ({
                     className="w-full px-3 py-2 rounded-xl border border-stone-200 bg-stone-50 text-stone-900 focus:bg-white focus:outline-none focus:ring-1 focus:ring-purple-500 font-semibold"
                   >
                     <option value="happ">🚀 HAPP (crypt4) зашифрованная</option>
-                    <option value="incy">⚡ INCY (VLESS / clck.ru)</option>
+                    <option value="incy">{isSourceCraft ? '⚡ INCY (VLESS / прямая SourceCraft)' : '⚡ INCY (VLESS / clck.ru)'}</option>
                   </select>
                 </div>
 

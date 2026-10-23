@@ -405,7 +405,7 @@ interface BotUser {
   excludedNodes?: string[]; // Исключенные узлы ("убавить из центрального")
   bypassBlock?: boolean; // Принудительный доступ в обход блокировок и отписок
   customNotes?: string; // Заметки администратора
-  clckUrl?: string; // Зашифрованная ссылка clck.ru для INCY
+  clckUrl?: string; // Ссылка INCY: SourceCraft RAW или clck.ru в зависимости от источника
   // Channel Single-Device Exclusion Fields
   isChannelExclusion?: boolean;
   channelExclusionOrigin?: 'manual_channel' | 'bot_fallback';
@@ -1175,7 +1175,7 @@ function normalizeStore(parsed: any): StoreData {
   }
   const expectedRawHosts: Partial<Record<GitProvider, string[]>> = {
     gitverse: ['gitverse.ru'],
-    sourcecraft: ['raw.sourcecraft.tech'],
+    sourcecraft: ['raw.sourcecraft.tech', 'sourcecraft.dev'],
     gitflic: ['gitflic.ru'],
     moshub: ['hub.mos.ru'],
     github: ['raw.githubusercontent.com', 'github.com'],
@@ -1236,10 +1236,21 @@ function normalizeStore(parsed: any): StoreData {
     parsed.repoFiles = parsed.repoFiles.map((f: any) => {
       let rawUrl = f.rawUrl || '';
       let finalUrl = f.finalUrl || '';
+      const fileSource = parsed.gitSources?.find((source: GitSourceItem) =>
+        source.id === (f.sourceId || parsed.activeGitSourceId)
+      );
+      if (fileSource?.provider === 'sourcecraft' && f.filePath) {
+        rawUrl = buildGitRawUrl(fileSource, f.filePath) || rawUrl;
+        if (f.format === 'incy') finalUrl = rawUrl;
+      }
       if (rawUrl.includes('puls-dostupa/nodes')) {
         rawUrl = rawUrl.replace('puls-dostupa/nodes/raw/branch/main', 'api/repos/Vaynet/bot/raw/branch/master');
       }
-      if (f.format === 'incy' && !isClckShortUrl(finalUrl)) finalUrl = '';
+      if (
+        f.format === 'incy' &&
+        !(fileSource?.provider === 'sourcecraft' && isRepositoryRawUrl(fileSource, finalUrl, f.filePath)) &&
+        !isClckShortUrl(finalUrl)
+      ) finalUrl = '';
       if (
         f.format === 'happ' &&
         !isHappUrlForVersion(finalUrl, parsed.happCryptVersion as HappCryptVersion)
@@ -1256,13 +1267,25 @@ function normalizeStore(parsed: any): StoreData {
       let rawUrl = u.gitRawUrl || '';
       let finalUrl = u.finalSubscriptionUrl || u.finalUrl || '';
       const token = u.subscriptionToken || `sub_${u.username || u.telegramId}`;
+      const userSourceId = u.subscriptionSourceId || u.sourceSubscriptions?.find(
+        (subscription: any) => subscription.sourceId
+      )?.sourceId || parsed.activeGitSourceId;
+      const userSource = parsed.gitSources?.find((source: GitSourceItem) => source.id === userSourceId);
+      if (userSource?.provider === 'sourcecraft' && u.gitFilePath) {
+        rawUrl = buildGitRawUrl(userSource, u.gitFilePath) || rawUrl;
+        if (u.subscriptionType === 'incy') finalUrl = rawUrl;
+      }
 
       if (rawUrl.includes('puls-dostupa/nodes')) {
         rawUrl = rawUrl.replace('puls-dostupa/nodes/raw/branch/main', 'api/repos/Vaynet/bot/raw/branch/master');
       }
 
       const selectedVersion = parsed.happCryptVersion as HappCryptVersion;
-      if (u.subscriptionType === 'incy' && !isClckShortUrl(finalUrl)) {
+      if (
+        u.subscriptionType === 'incy' &&
+        !(userSource?.provider === 'sourcecraft' && isRepositoryRawUrl(userSource, finalUrl, u.gitFilePath)) &&
+        !isClckShortUrl(finalUrl)
+      ) {
         finalUrl = '';
       } else if (
         u.subscriptionType === 'happ' &&
@@ -1284,6 +1307,39 @@ function normalizeStore(parsed: any): StoreData {
         finalSubscriptionUrl: finalUrl,
         finalUrl: finalUrl,
         clckUrl: finalUrl,
+        clckTargetUrl: userSource?.provider === 'sourcecraft' && u.subscriptionType === 'incy'
+          ? rawUrl
+          : u.clckTargetUrl,
+        sourceSubscriptions: (u.sourceSubscriptions || []).map((subscription: any) => {
+          const subscriptionSource = parsed.gitSources?.find((source: GitSourceItem) => source.id === subscription.sourceId);
+          if (subscriptionSource?.provider !== 'sourcecraft' || !subscription.filePath) return subscription;
+          const directUrl = buildGitRawUrl(subscriptionSource, subscription.filePath) || subscription.rawUrl;
+          return {
+            ...subscription,
+            rawUrl: directUrl,
+            ...(subscription.format === 'incy' ? { finalUrl: directUrl, clckTargetUrl: directUrl } : {}),
+          };
+        }),
+      };
+    });
+  }
+  if (parsed.exclusions) {
+    parsed.exclusions = parsed.exclusions.map((exclusion: ExclusionSubscription) => {
+      const sourceId = parsed.repoFiles?.find((file: RepoUserFile) =>
+        file.filePath === exclusion.gitFilePath &&
+        (file.userId === `excl_${exclusion.token}` || file.userId === exclusion.userId)
+      )?.sourceId;
+      const source = parsed.gitSources?.find((item: GitSourceItem) =>
+        item.id === (sourceId || parsed.activeGitSourceId)
+      );
+      if (source?.provider !== 'sourcecraft' || !exclusion.gitFilePath) return exclusion;
+      const directUrl = buildGitRawUrl(source, exclusion.gitFilePath) || exclusion.gitRawUrl || '';
+      return {
+        ...exclusion,
+        gitRawUrl: directUrl,
+        clckUrl: directUrl,
+        incyUrl: directUrl,
+        clckTargetUrl: directUrl,
       };
     });
   }
@@ -2038,10 +2094,8 @@ function buildGitRawUrl(source: GitSourceItem, filePath: string): string {
   const cleanPath = filePath.replace(/^\/+/, '');
 
   if (source.provider === 'sourcecraft') {
-    const cachedSha = gitFileMetadataCache.get(cleanPath)?.sha;
-    return cachedSha && /^[0-9a-f]{40}$/i.test(cachedSha)
-      ? `https://raw.sourcecraft.tech/raw/${cleanRepo}/${cachedSha}/${cleanPath}`
-      : '';
+    const sourcePath = [branch, ...cleanPath.split('/')].map(encodeURIComponent).join('/');
+    return `https://sourcecraft.dev/${cleanRepo}/raw/branch/${sourcePath}`;
   }
 
   if (source.provider === 'custom' && source.baseRawUrl && source.baseRawUrl.toLowerCase().includes(cleanRepo.toLowerCase())) {
@@ -2136,6 +2190,17 @@ function isClckShortUrl(url: string | undefined): url is string {
 }
 
 function getUserSubscriptionTargetUrl(user: any): string {
+  const sourceId = user.subscriptionSourceId || getActiveGitSource().id;
+  const source = store.gitSources?.find((item) => item.id === sourceId) || getActiveGitSource();
+  if (source.provider === 'sourcecraft' && user.gitFilePath) {
+    const subscription = user.sourceSubscriptions?.find(
+      (item: any) => item.sourceId === source.id && item.filePath === user.gitFilePath
+    );
+    const repoFile = store.repoFiles?.find(
+      (item) => item.sourceId === source.id && item.filePath.replace(/^\/+/, '') === user.gitFilePath.replace(/^\/+/, '')
+    );
+    return buildGitRawUrl(source, user.gitFilePath) || repoFile?.rawUrl || subscription?.rawUrl || user.gitRawUrl || '';
+  }
   return getUserSubscriptionGatewayUrl(user);
 }
 
@@ -2154,12 +2219,34 @@ function getRepositorySubscriptionGatewayUrl(token: string, sourceId?: string): 
   return `${getDirectAppBaseUrl()}/api/repo-sub/${encodeURIComponent(token)}${query}`;
 }
 
-function getExclusionSubscriptionGatewayUrl(exclusion: ExclusionSubscription): string {
+function getIncySubscriptionUrl(
+  source: GitSourceItem,
+  token: string,
+  filePath: string,
+  rawUrl: string
+): string {
+  if (source.provider === 'sourcecraft') {
+    const directUrl = buildGitRawUrl(source, filePath) || rawUrl;
+    if (!isRepositoryRawUrl(source, directUrl, filePath)) {
+      throw new Error(`Не удалось сформировать прямую RAW-ссылку SourceCraft на ${filePath}`);
+    }
+    return directUrl;
+  }
+  return getRepositorySubscriptionGatewayUrl(token, source.id);
+}
+
+function getExclusionIncyUrl(exclusion: ExclusionSubscription): string {
   const repoFile = store.repoFiles?.find((item) =>
     item.filePath === exclusion.gitFilePath &&
     (item.userId === `excl_${exclusion.token}` || item.userId === exclusion.userId)
   );
-  return getRepositorySubscriptionGatewayUrl(exclusion.token, repoFile?.sourceId || getActiveGitSource().id);
+  const sourceId = repoFile?.sourceId || getActiveGitSource().id;
+  const source = store.gitSources?.find((item) => item.id === sourceId) || getActiveGitSource();
+  if (exclusion.gitFilePath && source.provider === 'sourcecraft') {
+    const directUrl = buildGitRawUrl(source, exclusion.gitFilePath) || exclusion.gitRawUrl || repoFile?.rawUrl || '';
+    if (isRepositoryRawUrl(source, directUrl, exclusion.gitFilePath)) return directUrl;
+  }
+  return getRepositorySubscriptionGatewayUrl(exclusion.token, sourceId);
 }
 
 async function updateExclusionRepositoryLink(
@@ -2208,8 +2295,12 @@ async function updateExclusionRepositoryLink(
     updatedAt: new Date().toISOString(),
   });
 
-  const targetUrl = getRepositorySubscriptionGatewayUrl(exclusion.token, source.id);
-  if (exclusion.clckTargetUrl !== targetUrl || !isClckShortUrl(exclusion.clckUrl)) {
+  const targetUrl = getIncySubscriptionUrl(source, exclusion.token, exclusion.gitFilePath, rawUrl);
+  if (source.provider === 'sourcecraft') {
+    exclusion.clckUrl = targetUrl;
+    exclusion.incyUrl = targetUrl;
+    exclusion.clckTargetUrl = targetUrl;
+  } else if (exclusion.clckTargetUrl !== targetUrl || !isClckShortUrl(exclusion.clckUrl)) {
     const shortUrl = await shortenIncyUrl(targetUrl, exclusion.token);
     exclusion.clckUrl = shortUrl;
     exclusion.incyUrl = shortUrl;
@@ -2306,6 +2397,17 @@ function isRepositoryRawUrl(source: GitSourceItem, rawUrl: string, filePath?: st
     if (source.provider === 'sourcecraft') {
       const path = url.pathname.split('/').filter(Boolean);
       const repository = (source.repository || 'Vaynet/bot').replace(/^\/+|\/+$/g, '').split('/');
+      if (
+        hostname === 'sourcecraft.dev' &&
+        path.length >= repository.length + 4 &&
+        path[0] === repository[0] &&
+        repository.every((part, index) => path[index] === part) &&
+        path[repository.length] === 'raw' &&
+        path[repository.length + 1] === 'branch' &&
+        decodeURIComponent(path[repository.length + 2]) === (source.branch || getDefaultGitBranch(source.provider))
+      ) {
+        return true;
+      }
       const repositoryPath = path.slice(1, 1 + repository.length);
       const commitSha = path[1 + repository.length] || '';
       return hostname === 'raw.sourcecraft.tech' &&
@@ -2315,7 +2417,7 @@ function isRepositoryRawUrl(source: GitSourceItem, rawUrl: string, filePath?: st
         /^[0-9a-f]{40}$/i.test(commitSha);
     }
     const allowedHosts: Partial<Record<GitProvider, string[]>> = {
-      sourcecraft: ['raw.sourcecraft.tech'],
+      sourcecraft: ['raw.sourcecraft.tech', 'sourcecraft.dev'],
       gitverse: ['gitverse.ru'],
       gitflic: ['gitflic.ru'],
       moshub: ['hub.mos.ru'],
@@ -2389,6 +2491,9 @@ async function getExistingCurrentSourceSubscription(
       (!item.userId || item.userId === user.id)
   );
   const rawUrl = repoFile?.rawUrl || subscription.rawUrl;
+  const directRawUrl = source.provider === 'sourcecraft'
+    ? buildGitRawUrl(source, filePath) || rawUrl
+    : rawUrl;
   const format = subscription.format;
   const finalUrl = repoFile?.finalUrl || subscription.finalUrl;
   if (
@@ -2398,13 +2503,20 @@ async function getExistingCurrentSourceSubscription(
     !repoFile.contentHash ||
     repoFile.contentHash !== crypto.createHash('sha256').update(getUserRepoSubscriptionContent(user)).digest('hex') ||
     (format !== 'happ' && format !== 'incy') ||
-    !isRepositoryRawUrl(source, rawUrl, filePath) ||
-    (format === 'incy' && !isClckShortUrl(finalUrl))
+    !isRepositoryRawUrl(source, directRawUrl, filePath) ||
+    (format === 'incy' &&
+      (source.provider === 'sourcecraft'
+        ? finalUrl !== directRawUrl
+        : !isClckShortUrl(finalUrl)))
   ) return null;
 
-  const targetUrl = format === 'incy' ? getUserSubscriptionGatewayUrl(user, source.id) : getUserHappRedirectUrl(user);
+  const targetUrl = format === 'incy'
+    ? getIncySubscriptionUrl(source, user.subscriptionToken, filePath, directRawUrl)
+    : getUserHappRedirectUrl(user);
   let currentFinalUrl = finalUrl;
-  if (format === 'incy' && (
+  if (format === 'incy' && source.provider === 'sourcecraft') {
+    currentFinalUrl = directRawUrl;
+  } else if (format === 'incy' && (
     subscription.clckTargetUrl !== targetUrl ||
     !isClckShortUrl(finalUrl)
   )) {
@@ -2413,7 +2525,7 @@ async function getExistingCurrentSourceSubscription(
 
   user.subscriptionSourceId = source.id;
   user.gitFilePath = filePath;
-  user.gitRawUrl = rawUrl;
+  user.gitRawUrl = directRawUrl;
   user.subscriptionType = format;
   user.subscriptionName = format === 'happ' ? `HAPP (${store.happCryptVersion})` : 'INCY';
   const resolvedFinalUrl = format === 'happ' &&
@@ -2432,26 +2544,34 @@ async function getExistingCurrentSourceSubscription(
   return { url: resolvedFinalUrl, format, sourceName: source.name };
 }
 
-function applyUserIncyShortUrl(user: any, targetUrl: string, shortUrl: string): void {
-  user.clckUrl = shortUrl;
+function applyUserIncyShortUrl(user: any, targetUrl: string, subscriptionUrl: string): void {
+  user.clckUrl = subscriptionUrl;
   user.clckTargetUrl = targetUrl;
+  const source = store.gitSources?.find((item) => item.id === user.subscriptionSourceId);
+  const isDirectSourceCraftUrl = source?.provider === 'sourcecraft' &&
+    isRepositoryRawUrl(source, subscriptionUrl, user.gitFilePath);
+  if (isDirectSourceCraftUrl) user.gitRawUrl = subscriptionUrl;
   if (user.subscriptionType === 'incy') {
-    user.finalSubscriptionUrl = shortUrl;
-    user.finalUrl = shortUrl;
+    user.finalSubscriptionUrl = subscriptionUrl;
+    user.finalUrl = subscriptionUrl;
   }
   const subscription = user.sourceSubscriptions?.find(
     (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
   );
   if (subscription) {
-    subscription.finalUrl = shortUrl;
+    subscription.finalUrl = subscriptionUrl;
     subscription.clckTargetUrl = targetUrl;
+    if (isDirectSourceCraftUrl) subscription.rawUrl = subscriptionUrl;
   }
   const repoFile = store.repoFiles?.find(
     (item: RepoUserFile) =>
       item.sourceId === user.subscriptionSourceId &&
       item.filePath === user.gitFilePath
   );
-  if (repoFile) repoFile.finalUrl = shortUrl;
+  if (repoFile) {
+    repoFile.finalUrl = subscriptionUrl;
+    if (isDirectSourceCraftUrl) repoFile.rawUrl = subscriptionUrl;
+  }
 }
 
 function isHappUrlForVersion(url: string | undefined, version: HappCryptVersion): boolean {
@@ -2497,7 +2617,12 @@ async function refreshUserSubscriptionLink(
     throw new Error(`Источник не вернул действительный RAW-адрес файла ${filePath}`);
   }
   const isCurrentSource = user.subscriptionSourceId === sourceId || !user.subscriptionSourceId;
-  const targetUrl = format === 'happ' ? getUserHappRedirectUrl(user) : getUserSubscriptionGatewayUrl(user, sourceId);
+  const directRawUrl = source.provider === 'sourcecraft'
+    ? buildGitRawUrl(source, filePath) || rawUrl
+    : rawUrl;
+  const targetUrl = format === 'happ'
+    ? getUserHappRedirectUrl(user)
+    : getIncySubscriptionUrl(source, token, filePath, directRawUrl);
 
   if (!Array.isArray(user.sourceSubscriptions)) user.sourceSubscriptions = [];
   let subscription = user.sourceSubscriptions.find(
@@ -2515,13 +2640,13 @@ async function refreshUserSubscriptionLink(
     user.sourceSubscriptions.push(subscription);
   }
   const previousFinalUrl = subscription.finalUrl;
-  subscription.rawUrl = rawUrl;
+  subscription.rawUrl = directRawUrl;
   subscription.format = format;
   subscription.updatedAt = new Date().toISOString();
   if (isCurrentSource) {
     user.subscriptionSourceId = sourceId;
     user.gitFilePath = filePath;
-    user.gitRawUrl = rawUrl;
+    user.gitRawUrl = directRawUrl;
   }
 
   let finalUrl: string;
@@ -2540,7 +2665,9 @@ async function refreshUserSubscriptionLink(
       subscription.finalUrl = finalUrl;
     }
   } else {
-    if (
+    if (source.provider === 'sourcecraft') {
+      finalUrl = directRawUrl;
+    } else if (
       subscription.clckTargetUrl === targetUrl &&
       isClckShortUrl(subscription.finalUrl)
     ) {
@@ -2550,8 +2677,10 @@ async function refreshUserSubscriptionLink(
     } else {
       finalUrl = await shortenIncyUrl(targetUrl, token);
     }
-    if (!isClckShortUrl(finalUrl)) {
-      throw new Error('Не удалось обновить короткую INCY-ссылку clck.ru.');
+    if (source.provider === 'sourcecraft'
+      ? !isRepositoryRawUrl(source, finalUrl, filePath)
+      : !isClckShortUrl(finalUrl)) {
+      throw new Error(`Не удалось обновить ссылку INCY в источнике «${source.name}».`);
     }
     if (isCurrentSource) {
       applyUserIncyShortUrl(user, targetUrl, finalUrl);
@@ -2569,6 +2698,7 @@ async function refreshUserSubscriptionLink(
   const repoFile = store.repoFiles?.find(
     (item) => item.sourceId === sourceId && item.filePath === filePath
   );
+  if (repoFile) repoFile.rawUrl = directRawUrl;
   if (repoFile) repoFile.finalUrl = finalUrl;
   return finalUrl;
 }
@@ -2652,9 +2782,26 @@ async function resolveUserDisplayKey(user: any): Promise<string> {
     saveStore();
     return happUrl;
   } else {
-    const targetUrl = getUserSubscriptionGatewayUrl(user);
+    const sourceId = user.subscriptionSourceId || getActiveGitSource().id;
+    const source = store.gitSources?.find((item) => item.id === sourceId) || getActiveGitSource();
+    const filePath = user.gitFilePath ||
+      user.sourceSubscriptions?.find((item: any) => item.sourceId === source.id)?.filePath;
+    const sourceSubscription = user.sourceSubscriptions?.find(
+      (item: any) => item.sourceId === source.id && item.filePath === filePath
+    );
+    const rawUrl = source.provider === 'sourcecraft' && filePath
+      ? buildGitRawUrl(source, filePath) || sourceSubscription?.rawUrl || user.gitRawUrl || ''
+      : '';
+    const targetUrl = source.provider === 'sourcecraft' && filePath
+      ? getIncySubscriptionUrl(source, token, filePath, rawUrl)
+      : getUserSubscriptionGatewayUrl(user, source.id);
+    if (source.provider === 'sourcecraft') {
+      applyUserIncyShortUrl(user, targetUrl, targetUrl);
+      saveStore();
+      return targetUrl;
+    }
     const subscription = user.sourceSubscriptions?.find(
-      (item: any) => item.sourceId === user.subscriptionSourceId && item.filePath === user.gitFilePath
+      (item: any) => item.sourceId === source.id && item.filePath === filePath
     );
     const incyUrl = subscription?.clckTargetUrl === targetUrl && isClckShortUrl(subscription.finalUrl)
       ? subscription.finalUrl
@@ -3414,17 +3561,24 @@ async function ensureUserRepoFile(
       throw new Error(`Не удалось записать подписку в ${activeGit.name}: ${gitResult.error || 'ошибка Git'}`);
     }
     if (gitResult.rawUrl) {
-      gitRawUrl = gitResult.rawUrl;
+      gitRawUrl = activeGit.provider === 'sourcecraft'
+        ? buildGitRawUrl(activeGit, filePath) || gitResult.rawUrl
+        : gitResult.rawUrl;
     }
   }
   if (!isRepositoryRawUrl(activeGit, gitRawUrl, filePath)) {
     throw new Error(`Git-источник «${activeGit.name}» не вернул действительную RAW-ссылку на файл ${filePath}`);
   }
+  if (activeGit.provider === 'sourcecraft') {
+    gitRawUrl = buildGitRawUrl(activeGit, filePath) || gitRawUrl;
+  }
 
   let finalUrl = '';
-  const incyTargetUrl = getUserSubscriptionGatewayUrl(user, activeGit.id);
+  const incyTargetUrl = getIncySubscriptionUrl(activeGit, tokenSafe, filePath, gitRawUrl);
   if (format === 'happ') {
     finalUrl = buildHappCryptUrl(getUserHappRedirectUrl(user));
+  } else if (activeGit.provider === 'sourcecraft') {
+    finalUrl = incyTargetUrl;
   } else {
     const existingTargetUrl = sourceSubscription?.clckTargetUrl ||
       (user.subscriptionSourceId === activeGit.id && user.gitFilePath === filePath ? user.clckTargetUrl : undefined);
@@ -3436,7 +3590,10 @@ async function ensureUserRepoFile(
   if (format === 'happ' && !isHappUrlForVersion(finalUrl, store.happCryptVersion)) {
     throw new Error(`Не удалось сформировать HAPP-ссылку формата ${store.happCryptVersion}.`);
   }
-  if (format === 'incy' && !isClckShortUrl(finalUrl)) {
+  if (format === 'incy' && activeGit.provider === 'sourcecraft' && !isRepositoryRawUrl(activeGit, finalUrl, filePath)) {
+    throw new Error(`Не удалось сформировать прямую ссылку SourceCraft на файл ${filePath}.`);
+  }
+  if (format === 'incy' && activeGit.provider !== 'sourcecraft' && !isClckShortUrl(finalUrl)) {
     throw new Error('Не удалось сформировать короткую INCY-ссылку clck.ru.');
   }
 
@@ -4399,6 +4556,7 @@ async function syncGitSourceSubscribersWithCentral(activeGit: GitSourceItem, opt
 
           if (gitRes.success) {
             const updatedRawUrl =
+              (activeGit.provider === 'sourcecraft' ? buildGitRawUrl(activeGit, filePath) : '') ||
               (gitRes.rawUrl && isRepositoryRawUrl(activeGit, gitRes.rawUrl, filePath) ? gitRes.rawUrl : '') ||
               buildGitRawUrl(activeGit, filePath);
             if (!updatedRawUrl || !isRepositoryRawUrl(activeGit, updatedRawUrl, filePath)) {
@@ -5698,16 +5856,29 @@ app.get('/api/exclusions', async (req, res) => {
       if (repoFile) repoFile.finalUrl = excl.happUrl;
       migratedLinks = true;
     }
-    const clckTargetUrl = getExclusionSubscriptionGatewayUrl(excl);
+    const sourceId = store.repoFiles?.find((file) => file.filePath === excl.gitFilePath)?.sourceId;
+    const source = store.gitSources?.find((item) => item.id === sourceId) || getActiveGitSource();
+    const clckTargetUrl = getExclusionIncyUrl(excl);
     if (
       excl.gitFilePath &&
       excl.gitRawUrl &&
-      (!isClckShortUrl(excl.clckUrl) || excl.clckTargetUrl !== clckTargetUrl)
+      (source.provider === 'sourcecraft'
+        ? excl.clckUrl !== clckTargetUrl || excl.clckTargetUrl !== clckTargetUrl
+        : !isClckShortUrl(excl.clckUrl) || excl.clckTargetUrl !== clckTargetUrl)
     ) {
       try {
-        excl.clckUrl = await shortenIncyUrl(clckTargetUrl, excl.token);
+        excl.clckUrl = source.provider === 'sourcecraft'
+          ? clckTargetUrl
+          : await shortenIncyUrl(clckTargetUrl, excl.token);
         excl.incyUrl = excl.clckUrl;
         excl.clckTargetUrl = clckTargetUrl;
+        const repoFile = store.repoFiles?.find(
+          (file) => file.sourceId === source.id && file.filePath === excl.gitFilePath
+        );
+        if (repoFile) {
+          if (source.provider === 'sourcecraft') repoFile.rawUrl = clckTargetUrl;
+          repoFile.finalUrl = excl.clckUrl;
+        }
         const linkedUser = store.users?.find((user) =>
           user.id === excl.userId || user.subscriptionToken === excl.token
         );
@@ -5840,7 +6011,9 @@ app.post('/api/exclusions', async (req, res) => {
     return res.status(502).json({ success: false, message: `Не удалось создать файл исключения в ${activeGit.name}: ${err.message}` });
   }
 
-  if (!gitRawUrl) gitRawUrl = buildGitRawUrl(activeGit, filePath);
+  gitRawUrl = activeGit.provider === 'sourcecraft'
+    ? buildGitRawUrl(activeGit, filePath) || gitRawUrl
+    : gitRawUrl || buildGitRawUrl(activeGit, filePath);
 
   let happUrl = '';
   const happTargetUrl = getHappRedirectUrl(token);
@@ -5852,9 +6025,11 @@ app.post('/api/exclusions', async (req, res) => {
 
   // INCY version: shortened clck.ru link (e.g. https://clck.ru/3W7gT2)
   let clckUrl = '';
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token, activeGit.id);
+  const clckTargetUrl = getIncySubscriptionUrl(activeGit, token, filePath, gitRawUrl);
   try {
-    clckUrl = await shortenIncyUrl(clckTargetUrl, token);
+    clckUrl = activeGit.provider === 'sourcecraft'
+      ? clckTargetUrl
+      : await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
     console.error('[Exclusion clck.ru shortening failed]:', err.message);
     return res.status(502).json({ success: false, message: `Не удалось создать короткую INCY-ссылку: ${err.message}` });
@@ -6115,66 +6290,14 @@ app.post('/api/exclusions/:id/sync', async (req, res) => {
       return res.status(502).json({ success: false, message: `Не удалось обновить файл в ${activeGit.name}: ${gitRes.error || 'ошибка Git'}` });
     }
 
-    if (gitRes.rawUrl) target.gitRawUrl = gitRes.rawUrl;
-    const targetContentHash = crypto.createHash('sha256').update(nodeContent).digest('hex');
-    if (!store.repoFiles) store.repoFiles = [];
-    const normalizedFilePath = target.gitFilePath.replace(/^\/+/, '');
-    let repoFile = store.repoFiles.find(
-      (f) => f.filePath.replace(/^\/+/, '') === normalizedFilePath &&
-        (f.userId === `excl_${target.token}` || (target.userId && f.userId === target.userId))
-    ) || store.repoFiles.find(
-      (f) => f.sourceId === activeGit.id && f.filePath.replace(/^\/+/, '') === normalizedFilePath
-    );
-    if (!repoFile) {
-      repoFile = {
-        filePath: target.gitFilePath,
-        rawUrl: '',
-        updatedAt: new Date().toISOString(),
-        format: 'incy',
-        finalUrl: target.clckUrl || '',
-        sizeBytes: 0,
-        isPoolFree: false,
-      };
-      store.repoFiles.push(repoFile);
-    }
-    Object.assign(repoFile, {
-      sourceId: activeGit.id,
-      userId: `excl_${target.token}`,
-      telegramId: target.telegramId,
-      username: target.username,
-      firstName: target.name,
-      rawUrl: gitRes.rawUrl || buildGitRawUrl(activeGit, target.gitFilePath),
-      sha: gitRes.sha || repoFile.sha,
-      sizeBytes: Buffer.byteLength(nodeContent, 'utf-8'),
-      nodesFound: parseNodeStats(nodeContent).total,
-      contentHash: targetContentHash,
-      updatedAt: new Date().toISOString(),
-    });
+    const rawUrl = activeGit.provider === 'sourcecraft'
+      ? buildGitRawUrl(activeGit, target.gitFilePath) || gitRes.rawUrl
+      : gitRes.rawUrl || buildGitRawUrl(activeGit, target.gitFilePath);
+    if (!rawUrl) throw new Error(`Источник ${activeGit.name} не вернул RAW-ссылку на ${target.gitFilePath}`);
+    await updateExclusionRepositoryLink(target, activeGit, nodeContent, rawUrl, gitRes.sha);
   } catch (err: any) {
     return res.status(502).json({ success: false, message: `Ошибка записи в ${activeGit.name}: ${err.message}` });
   }
-
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(target.token, activeGit.id);
-  if (target.clckTargetUrl !== clckTargetUrl || !isClckShortUrl(target.clckUrl)) {
-    try {
-      const short = await shortenIncyUrl(clckTargetUrl, target.token);
-      target.clckUrl = short;
-      target.incyUrl = short;
-      target.clckTargetUrl = clckTargetUrl;
-      const repoFile = store.repoFiles?.find(
-        (item) => item.sourceId === activeGit.id && item.filePath.replace(/^\/+/, '') === target.gitFilePath!.replace(/^\/+/, '')
-      );
-      if (repoFile) repoFile.finalUrl = short;
-    } catch (err: any) {
-      saveStore();
-      return res.status(502).json({
-        success: false,
-        message: `Файл обновлён в ${activeGit.name}, но INCY-ссылку обновить не удалось: ${err.message}`,
-      });
-    }
-  }
-
-  target.lastSyncAt = new Date().toISOString();
   saveStore();
   res.json({ success: true, exclusion: target, message: `Исключение синхронизировано с ${activeGit.name}` });
 });
@@ -6188,10 +6311,14 @@ app.post('/api/exclusions/:id/shorten-clck', async (req, res) => {
   if (!target.gitRawUrl) {
     return res.status(400).json({ success: false, message: 'У исключения нет RAW-ссылки на файл в репозитории.' });
   }
-  const subscriptionUrl = getExclusionSubscriptionGatewayUrl(target);
+  const subscriptionUrl = getExclusionIncyUrl(target);
   let shortUrl: string;
   try {
-    shortUrl = await shortenIncyUrl(subscriptionUrl, target.token);
+    const sourceId = store.repoFiles?.find((file) => file.filePath === target.gitFilePath)?.sourceId;
+    const source = store.gitSources?.find((item) => item.id === sourceId) || getActiveGitSource();
+    shortUrl = source.provider === 'sourcecraft'
+      ? subscriptionUrl
+      : await shortenIncyUrl(subscriptionUrl, target.token);
   } catch (err: any) {
     console.error(`[Exclusion manual shorten failed] ${target.token}:`, err.message);
     return res.status(502).json({ success: false, message: err.message });
@@ -6276,6 +6403,8 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
         filePath,
         content: centralNodes,
         commitMessage: `Create single-device channel exclusion for ${cleanUsername ? '@' + cleanUsername : rawTgId}`,
+        provider: activeGit.provider,
+        apiUrl: activeGit.apiUrl,
       });
       if (gitResult.rawUrl) gitRawUrl = gitResult.rawUrl;
     } catch (err: any) {
@@ -6283,9 +6412,9 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
     }
   }
 
-  if (!gitRawUrl) {
-    gitRawUrl = buildGitRawUrl(activeGit, filePath);
-  }
+  gitRawUrl = activeGit.provider === 'sourcecraft'
+    ? buildGitRawUrl(activeGit, filePath) || gitRawUrl
+    : gitRawUrl || buildGitRawUrl(activeGit, filePath);
 
   // HAPP crypt4 link
   let happUrl = '';
@@ -6298,9 +6427,11 @@ app.post('/api/exclusions/channel-grant', async (req, res) => {
 
   // INCY (clck.ru encrypted link)
   let clckUrl = '';
-  const clckTargetUrl = getRepositorySubscriptionGatewayUrl(token, activeGit.id);
+  const clckTargetUrl = getIncySubscriptionUrl(activeGit, token, filePath, gitRawUrl);
   try {
-    clckUrl = await shortenIncyUrl(clckTargetUrl, token);
+    clckUrl = activeGit.provider === 'sourcecraft'
+      ? clckTargetUrl
+      : await shortenIncyUrl(clckTargetUrl, token);
   } catch (err: any) {
     console.error('[Channel Exclusion clck shortening failed]:', err.message);
     return res.status(502).json({ success: false, message: `Не удалось создать короткую INCY-ссылку: ${err.message}` });
@@ -6732,51 +6863,11 @@ app.post('/api/exclusions/sync-all', async (req, res) => {
         continue;
       }
 
-      if (gitRes.rawUrl) excl.gitRawUrl = gitRes.rawUrl;
-      const targetContentHash = crypto.createHash('sha256').update(nodeContent).digest('hex');
-      if (!store.repoFiles) store.repoFiles = [];
-      const normalizedFilePath = excl.gitFilePath.replace(/^\/+/, '');
-      let repoFile = store.repoFiles.find(
-        (f) => f.filePath.replace(/^\/+/, '') === normalizedFilePath &&
-          (f.userId === `excl_${excl.token}` || (excl.userId && f.userId === excl.userId))
-      ) || store.repoFiles.find(
-        (f) => f.sourceId === activeGit.id && f.filePath.replace(/^\/+/, '') === normalizedFilePath
-      );
-      if (!repoFile) {
-        repoFile = {
-          filePath: excl.gitFilePath,
-          rawUrl: '',
-          updatedAt: new Date().toISOString(),
-          format: 'incy',
-          finalUrl: excl.clckUrl || '',
-          sizeBytes: 0,
-          isPoolFree: false,
-        };
-        store.repoFiles.push(repoFile);
-      }
-      Object.assign(repoFile, {
-        sourceId: activeGit.id,
-        userId: `excl_${excl.token}`,
-        telegramId: excl.telegramId,
-        username: excl.username,
-        firstName: excl.name,
-        rawUrl: gitRes.rawUrl || buildGitRawUrl(activeGit, excl.gitFilePath),
-        sha: gitRes.sha || repoFile.sha,
-        sizeBytes: Buffer.byteLength(nodeContent, 'utf-8'),
-        nodesFound: parseNodeStats(nodeContent).total,
-        contentHash: targetContentHash,
-        updatedAt: new Date().toISOString(),
-      });
-
-      const gatewayUrl = getRepositorySubscriptionGatewayUrl(excl.token, activeGit.id);
-      if (excl.clckTargetUrl !== gatewayUrl || !isClckShortUrl(excl.clckUrl)) {
-        const shortUrl = await shortenIncyUrl(gatewayUrl, excl.token);
-        excl.clckUrl = shortUrl;
-        excl.incyUrl = shortUrl;
-        excl.clckTargetUrl = gatewayUrl;
-        repoFile.finalUrl = shortUrl;
-      }
-      excl.lastSyncAt = new Date().toISOString();
+      const rawUrl = activeGit.provider === 'sourcecraft'
+        ? buildGitRawUrl(activeGit, excl.gitFilePath) || gitRes.rawUrl
+        : gitRes.rawUrl || buildGitRawUrl(activeGit, excl.gitFilePath);
+      if (!rawUrl) throw new Error(`Источник ${activeGit.name} не вернул RAW-ссылку на ${excl.gitFilePath}`);
+      await updateExclusionRepositoryLink(excl, activeGit, nodeContent, rawUrl, gitRes.sha);
       count++;
     } catch (err: any) {
       errors.push(`Файл ${excl.gitFilePath} в ${activeGit.name}: ${err.message}`);
@@ -7299,6 +7390,15 @@ app.post('/api/users/:id/shorten-clck', async (req, res) => {
   if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
 
   const rawUrl = getUserSubscriptionTargetUrl(user);
+  const source = store.gitSources?.find((item) => item.id === user.subscriptionSourceId) || getActiveGitSource();
+  if (source.provider === 'sourcecraft') {
+    if (!isRepositoryRawUrl(source, rawUrl, user.gitFilePath)) {
+      return res.status(409).json({ success: false, message: 'Не найдена прямая RAW-ссылка SourceCraft на файл пользователя.' });
+    }
+    applyUserIncyShortUrl(user, rawUrl, rawUrl);
+    saveStore();
+    return res.json({ success: true, clckUrl: rawUrl, user });
+  }
   let shortUrl: string;
   try {
     shortUrl = await shortenIncyUrl(rawUrl, user.subscriptionToken);
@@ -11010,16 +11110,23 @@ AllowedIPs = 0.0.0.0/0`;
   const activeGit = getActiveGitSource();
   const matchedUser = store.users.find((u) => u.subscriptionToken === userToken);
   const matchedExclusion = store.exclusions.find((item) => item.token === userToken);
+  const exclusionRepoFile = matchedExclusion
+    ? store.repoFiles?.find((item) => item.filePath === matchedExclusion.gitFilePath)
+    : undefined;
+  const resolvedSource = matchedUser
+    ? store.gitSources?.find((source) => source.id === matchedUser.subscriptionSourceId) || activeGit
+    : store.gitSources?.find((source) => source.id === exclusionRepoFile?.sourceId) || activeGit;
   const candidateRawUrl = matchedUser
     ? getUserSubscriptionTargetUrl(matchedUser)
-    : buildGitRawUrl(activeGit, `subs/${userToken}.txt`);
-  const targetSource = matchedUser
-    ? store.gitSources?.find((source) => source.id === matchedUser.subscriptionSourceId) || activeGit
-    : activeGit;
+    : matchedExclusion?.gitFilePath
+      ? buildGitRawUrl(resolvedSource, matchedExclusion.gitFilePath) || matchedExclusion.gitRawUrl || ''
+      : buildGitRawUrl(activeGit, `subs/${userToken}.txt`);
+  const targetSource = resolvedSource;
   const targetFilePath =
     matchedUser?.sourceSubscriptions?.find((item) => item.sourceId === targetSource.id && item.filePath === matchedUser.gitFilePath)?.filePath ||
     matchedUser?.sourceSubscriptions?.find((item) => item.sourceId === targetSource.id)?.filePath ||
     matchedUser?.gitFilePath ||
+    matchedExclusion?.gitFilePath ||
     `subs/${userToken}.txt`;
   const rawFileUrl = isRepositoryRawUrl(targetSource, candidateRawUrl, targetFilePath) ? candidateRawUrl : '';
   const happTargetUrl = matchedUser
@@ -11052,12 +11159,16 @@ AllowedIPs = 0.0.0.0/0`;
     },
     {
       id: 'incy',
-      name: 'INCY (Зашифровано clck.ru)',
+      name: targetSource.provider === 'sourcecraft' ? 'INCY (прямая ссылка на файл SourceCraft)' : 'INCY (Зашифровано clck.ru)',
       client: 'INCY / Sing-box / Shadowrocket',
       filename: `${userName}_incy.txt`,
       content: base64Content,
-      url: isClckShortUrl(matchedUser?.clckUrl) ? matchedUser.clckUrl : '',
-      shortUrl: isClckShortUrl(matchedUser?.clckUrl) ? matchedUser.clckUrl : '',
+      url: targetSource.provider === 'sourcecraft'
+        ? rawFileUrl
+        : isClckShortUrl(matchedUser?.clckUrl) ? matchedUser.clckUrl : '',
+      shortUrl: targetSource.provider === 'sourcecraft'
+        ? rawFileUrl
+        : isClckShortUrl(matchedUser?.clckUrl) ? matchedUser.clckUrl : '',
     },
     {
       id: 'clash',

@@ -272,7 +272,7 @@ export interface BotUser {
   excludedNodes?: string[]; // Исключенные узлы ("убавить из центрального")
   bypassBlock?: boolean; // Принудительный доступ в обход блокировок и отписок
   customNotes?: string; // Заметки администратора
-  clckUrl?: string; // Зашифрованная ссылка clck.ru для INCY
+  clckUrl?: string; // Ссылка INCY: SourceCraft RAW или clck.ru в зависимости от источника
   // Поля исключения из центр. источника (1 устройство, привязка к каналу)
   isChannelExclusion?: boolean; // Выдано вручную через подраздел "Исключения: Выдача из центр. источника (1 устройство)"
   channelExclusionOrigin?: 'manual_channel';
@@ -339,7 +339,7 @@ export interface ExclusionSubscription {
   gitRawUrl?: string;
   happUrl?: string;
   incyUrl?: string;
-  clckUrl?: string; // clck.ru зашифрованная ссылка
+  clckUrl?: string; // Ссылка INCY: SourceCraft RAW или clck.ru в зависимости от источника
   lastSyncAt?: string;
   connectedClients?: ConnectedClientInfo[];
   // Temporary Exclusion (Тестовая ссылка с таймером)

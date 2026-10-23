@@ -310,7 +310,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
         setCustomSubUser(res.user);
       }
       await onSyncChannel();
-      setCustomSubSuccessMsg('Ссылка clck.ru успешно сгенерирована и обновлена!');
+      setCustomSubSuccessMsg('Ссылка подписки обновлена!');
       setTimeout(() => setCustomSubSuccessMsg(null), 3000);
     } catch (err: any) {
       alert(err.message || 'Ошибка генерации clck.ru');
@@ -477,10 +477,17 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
 
   const handleCopyLink = (u: BotUser, e: React.MouseEvent) => {
     e.stopPropagation();
+    const source = gitSources.find((item) => item.id === u.subscriptionSourceId);
+    const isDirectSourceCraftUrl = source?.provider === 'sourcecraft' &&
+      /^https:\/\/(?:sourcecraft\.dev\/|raw\.sourcecraft\.tech\/)/i.test(u.gitRawUrl || '');
     const url = u.subscriptionType === 'incy'
-      ? [u.clckUrl, u.finalSubscriptionUrl].find((candidate) =>
-          /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(candidate || '')
-        )
+      ? isDirectSourceCraftUrl
+        ? [u.finalSubscriptionUrl, u.gitRawUrl].find((candidate) =>
+            /^https:\/\/(?:sourcecraft\.dev\/|raw\.sourcecraft\.tech\/)/i.test(candidate || '')
+          )
+        : [u.clckUrl, u.finalSubscriptionUrl].find((candidate) =>
+            /^https:\/\/clck\.ru\/[A-Za-z0-9_-]+$/i.test(candidate || '')
+          )
       : [u.finalSubscriptionUrl, u.clckUrl].find((candidate) =>
           /^happ:\/\/crypt[345]\//i.test(candidate || '')
         );
@@ -488,7 +495,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
       setChannelSyncResultAlert({
         type: 'error',
         text: u.subscriptionType === 'incy'
-          ? 'Короткая ссылка INCY clck.ru еще не создана. Синхронизируйте ссылку и попробуйте снова.'
+          ? 'Ссылка INCY еще не сформирована. Синхронизируйте ссылку и попробуйте снова.'
           : 'Для пользователя пока не сформирована ссылка HAPP.',
       });
       return;
@@ -1572,7 +1579,7 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
                       <button
                         onClick={(e) => handleCopyLink(u, e)}
                         className="p-1.5 rounded-lg border border-stone-200 hover:bg-stone-100 text-stone-600"
-                        title="Скопировать готовую ссылку подписки (HAPP crypt4 или INCY clck.ru)"
+                        title="Скопировать готовую ссылку подписки (HAPP или прямая/короткая INCY-ссылка)"
                       >
                         {copiedId === u.subscriptionToken ? (
                           <Check className="h-3.5 w-3.5 text-emerald-600" />
@@ -2255,22 +2262,22 @@ export const UsersChannelView: React.FC<UsersChannelViewProps> = ({
               </div>
             )}
 
-            {/* Section 6: INCY Link with clck.ru */}
+            {/* Section 6: INCY subscription file link */}
             <div className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/70 space-y-2 text-xs">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-stone-900 flex items-center space-x-1.5">
                   <GitBranch className="h-3.5 w-3.5 text-emerald-600" />
-                  <span>Ссылка подписки INCY (Зашифровано clck.ru):</span>
+                  <span>Ссылка файла подписки INCY:</span>
                 </span>
                 <button
                   type="button"
                   onClick={handleRefreshUserClck}
                   disabled={isRefreshingUserClck}
                   className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 font-medium text-[11px] flex items-center space-x-1 cursor-pointer disabled:opacity-50"
-                  title="Сгенерировать короткую ссылку clck.ru"
+                  title="Обновить ссылку подписки"
                 >
                   <RefreshCw className={`h-3 w-3 ${isRefreshingUserClck ? 'animate-spin text-emerald-600' : 'text-stone-500'}`} />
-                  <span>{isRefreshingUserClck ? 'Генерация...' : 'Обновить clck.ru'}</span>
+                  <span>{isRefreshingUserClck ? 'Обновление...' : 'Обновить ссылку'}</span>
                 </button>
               </div>
 

@@ -932,7 +932,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <h4 className="text-sm font-bold text-indigo-950">Формат ссылок HAPP</h4>
               <p className="mt-1 text-xs text-indigo-800">
                 Выберите crypt3, crypt4 или crypt5. Сохранение обновит формат ссылок у всех уже выданных HAPP-подписок.
-                Ссылки INCY всегда сокращаются через clck.ru.
+                Для SourceCraft INCY использует прямую RAW-ссылку на файл в репозитории; для остальных источников используется короткая clck.ru-ссылка.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
